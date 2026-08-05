@@ -28,6 +28,8 @@ Settled. Check here before re-opening any of these.
 
 **Config lives in the OS-standard dir** via Tauri's `path::app_config_dir()` — `%APPDATA%\vados\` on Windows, `~/.config/vados/` on Linux. Never hardcoded.
 
+**OSC markers are parsed in the frontend by xterm, never in Rust.** Rust is a dumb pipe. Parsing them in Rust means delivering them out-of-band from the bytes they describe, and there is no ordering guarantee between two Tauri channels — a fast command's output arrives in the same 8 KB read as its own `133;D` and the next prompt, so the event overtakes the data and the output is attributed to the wrong command. xterm's `registerOscHandler` runs mid-parse at the exact cursor position. Reverted once already; do not reintroduce.
+
 **OSC 133 over prompt heuristics.** Matching the prompt string breaks on custom prompts, multiline prompts, oh-my-zsh, and starship. The cost of OSC 133 is shell init injection; worth it.
 
 ## Animation

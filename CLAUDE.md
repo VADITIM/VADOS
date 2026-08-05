@@ -23,4 +23,4 @@ Two renderers over one PTY stream:
 - **Block renderer** (default) — plain DOM, one `<section>` per command. This is what gets styled and animated.
 - **xterm.js** (fallback) — mounted only on alt-screen enter (`\x1b[?1049h`) for `vim`, `htop`, `claude`. Raw passthrough, never intercepted, never animated.
 
-Command boundaries come from OSC 133 shell integration, parsed in Rust before output reaches the renderer.
+Command boundaries come from OSC 133 shell integration, parsed by xterm's own OSC handlers in the frontend — never in Rust. A marker delivered out-of-band from the bytes around it arrives out of order, and the output gets filed under the wrong command. Rust is a dumb pipe.

@@ -21,16 +21,25 @@ xterm.js is **not** the primary view. Since ~95% of output is markdown blocks wi
 
 ```
                  ┌──────────────────────────┐
-  shell ──PTY──▶ │ Rust: parse OSC 133 / 7  │
-                 │      + alt-screen detect │
+  shell ──PTY──▶ │ Rust: dumb pipe          │
                  └────────────┬─────────────┘
-                              │ Tauri channel (raw bytes + events)
+                              │ Tauri channel (raw bytes, untouched)
+                 ▼
+                 ┌──────────────────────────┐
+                 │ xterm.js: VT parse       │
+                 │  OSC 133/7 handlers,     │
+                 │  alt-screen buffer swap  │
+                 └────────────┬─────────────┘
                  ┌────────────┴─────────────┐
                  ▼                          ▼
-        Block renderer (default)     xterm.js (fallback)
-        DOM sections, markdown,      raw passthrough,
+        Block renderer (default)     xterm.js view (fallback)
+        reads back xterm's buffer    raw passthrough,
         styled + animated            never intercepted
 ```
+
+**One parser, not two.** Markers are read by xterm's own `registerOscHandler`, so a handler fires mid-parse with the cursor exactly where the marker sat in the stream. Parsing them in Rust and forwarding them out-of-band was tried and reverted: two channels have no ordering guarantee, so a `command_end` could overtake the output chunk it referred to and that output ended up filed under the wrong command. Alt-screen detection rides on `buffer.onBufferChange` for the same reason.
+
+**Block text is read back out of xterm's screen buffer**, not accumulated from the raw stream. xterm has already applied every escape sequence — cursor moves, erase-line, PSReadLine's full-line redraw on each keystroke, reflow on resize. Each block holds an `IMarker` on its first row and re-reads to the cursor with `translateToString()`.
 
 **Block renderer** — plain DOM. One `<section>` per command: divider, `#` command heading, output body, `##` result heading tinted by exit code. This is what gets styled and animated.
 
@@ -47,7 +56,7 @@ ANSI → HTML conversion happens **only** here. Prose-styled markdown never touc
 1. Rust reads PTY output in 8 KB chunks on a dedicated thread.
 2. Bytes stream to the frontend over `tauri::ipc::Channel` as `InvokeResponseBody::Raw`. Deliberately *not* `emit` — channels avoid per-event JSON overhead on a high-frequency binary stream.
 3. **Decoding is the frontend's job.** Rust never converts to `String`, so multi-byte characters split across two reads are not corrupted. xterm and the block renderer both reassemble.
-4. From Phase 2, Rust also strips OSC 133 / OSC 7 markers *before* forwarding and emits structured `command_start` / `command_end` events alongside the byte stream.
+4. Rust forwards the bytes verbatim. OSC 133 / OSC 7 markers are consumed in the frontend by xterm's OSC handlers (returning `true` keeps them off the screen) — see the ordering note above for why this cannot move back into Rust.
 
 ## Command boundaries
 

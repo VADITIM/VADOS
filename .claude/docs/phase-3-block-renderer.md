@@ -1,6 +1,21 @@
 # Phase 3 — Block Renderer & Live Container
 
-**Status: not started.** Blocked on Phase 2.
+**Status: in progress.** Structure is in place; markdown rendering is not.
+
+## Current state
+
+- **Block text comes from xterm's screen buffer, not the raw byte stream.** Each block registers an `IMarker` on its prompt row; after every `term.write()` completes, the rows from that marker to the cursor are read back with `translateToString()`. xterm has already applied the escape sequences, so PSReadLine's per-keystroke line redraws collapse to one line and resize reflow is handled for free. This is the "use an existing parser, do not hand-roll one" rule below, satisfied by the parser already in the app.
+- **The input bar is docked at the bottom of `.app`** as a flex sibling of the scroll region (not `position: fixed`), so output and input are locked independently and the prompt is always visible. It mirrors xterm's cursor row, split at the column where the shell's prompt string ends — that column is captured once per prompt, on the first write after OSC 133;A.
+- **Enter is the hand-off.** `term.onData` seeing `\r` is what converts the typed line into a new block; the OSC events cannot do it because they arrive on a different channel than the bytes they describe, so a marker placed on an event lands against a not-yet-written screen.
+- **Block anatomy is split three ways** — `command` (plain), `buffer` (markdown, once a renderer is chosen), result line (plain). The command line is stored separately at Enter and stripped from the snapshot, so it never reaches the markdown path.
+
+- **Structured output, not a markdown string.** `src/lib/parse.js` turns `buffer` into `heading` / `list` / `text` nodes and the component renders them as DOM. No markup is generated or re-parsed, so arbitrary command output can never be read as markup — Svelte escapes text nodes. Two rules so far: a line ending in `:` is a heading, and the body under it becomes a list only if it has 2+ lines (so `npm`'s `Usage:` lists but `All commands:` stays prose). One blank line between heading and body is allowed; the next blank ends the group. Self-check: `node src/lib/parse.check.mjs`.
+
+## Still to do
+
+- More parser rules, or a swap to a real renderer — see [tasks.md](tasks.md).
+- Error / note output as fenced code blocks — needs stderr detection, see [tasks.md](tasks.md).
+- The input-to-block transition animation ("shoot out" the typed line into a new block as one module) — Phase 5, see [../../ANIMATION.md](../../ANIMATION.md).
 
 ## Original plan
 

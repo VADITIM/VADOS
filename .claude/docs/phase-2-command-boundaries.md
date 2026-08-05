@@ -1,6 +1,6 @@
 # Phase 2 — Command Boundaries (OSC 133)
 
-**Status: not started.** Blocked on Phase 1 manual verification.
+**Status: done, verified.** PowerShell prompt integration confirmed working — clean prompt, no leaked escape sequences.
 
 ## Why this comes first
 

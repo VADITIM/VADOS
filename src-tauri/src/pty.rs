@@ -1,8 +1,16 @@
 //! PTY session backing the terminal view.
 //!
 //! One session per window. Output is streamed to the frontend as raw bytes over
-//! a Tauri channel; decoding to text is the frontend's job so that multi-byte
-//! characters split across reads are not corrupted.
+//! a Tauri channel, untouched — decoding to text is the frontend's job so that
+//! multi-byte characters split across reads are not corrupted.
+//!
+//! OSC 133/7 shell-integration markers are deliberately *not* parsed here. They
+//! were, once, and forwarded as events on a second channel — but two channels
+//! give no ordering guarantee against each other, so a marker could arrive
+//! before the output chunk it referred to and the renderer would file that
+//! output under the wrong command. xterm.js parses them instead, via
+//! `registerOscHandler`, where the handler fires mid-parse at exactly the right
+//! cursor position. This process is a dumb pipe.
 
 use std::io::{Read, Write};
 use std::sync::Mutex;
@@ -10,6 +18,13 @@ use std::sync::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
+
+#[cfg(not(windows))]
+const BASH_INTEGRATION: &str = include_str!("../resources/shell/integration.bash");
+#[cfg(not(windows))]
+const ZSH_INTEGRATION: &str = include_str!("../resources/shell/integration.zsh");
+#[cfg(windows)]
+const POWERSHELL_INTEGRATION: &str = include_str!("../resources/shell/integration.ps1");
 
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
@@ -28,17 +43,51 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-/// The shell to launch. `CommandBuilder::new_default_prog` is deliberately not
-/// used: on Windows it resolves to `cmd.exe` via `ComSpec`, and we want PowerShell.
-fn default_shell() -> CommandBuilder {
-    #[cfg(windows)]
-    {
-        CommandBuilder::new("powershell.exe")
+/// Writes a shell-integration snippet to a fresh temp file/dir and returns the
+/// path. A new file per launch avoids clashing with a previous session's copy.
+#[cfg(not(windows))]
+fn write_temp(name: &str, contents: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::env::temp_dir().join(format!("vados-{}-{}", name, std::process::id()));
+    std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn build_shell_command() -> Result<CommandBuilder, String> {
+    let mut cmd = CommandBuilder::new("powershell.exe");
+    cmd.arg("-NoLogo");
+    cmd.arg("-NoExit");
+    cmd.arg("-Command");
+    cmd.arg(POWERSHELL_INTEGRATION);
+    Ok(cmd)
+}
+
+#[cfg(not(windows))]
+fn build_shell_command() -> Result<CommandBuilder, String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let shell_name = shell.rsplit('/').next().unwrap_or("bash");
+
+    let mut cmd = CommandBuilder::new(&shell);
+    if shell_name == "zsh" {
+        // ZDOTDIR override makes zsh read <dir>/.zshrc instead of ~/.zshrc; our
+        // snippet sources the real one first.
+        let dir = std::env::temp_dir().join(format!("vados-zsh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(".zshrc"), ZSH_INTEGRATION).map_err(|e| e.to_string())?;
+        cmd.env("ZDOTDIR", dir);
+        cmd.arg("-i");
+    } else {
+        // Fish has no equivalent injection flag — falls back to plain, unintegrated.
+        // No OSC 133 events for fish sessions until a manual rc line ships (see tasks.md).
+        if shell_name == "fish" {
+            return Ok(cmd);
+        }
+        let rcfile = write_temp("bash-rc", BASH_INTEGRATION)?;
+        cmd.arg("--rcfile");
+        cmd.arg(rcfile);
+        cmd.arg("-i");
     }
-    #[cfg(not(windows))]
-    {
-        CommandBuilder::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()))
-    }
+    Ok(cmd)
 }
 
 #[tauri::command]
@@ -53,7 +102,7 @@ pub fn pty_spawn(
         .openpty(size(cols, rows))
         .map_err(|e| e.to_string())?;
 
-    let mut cmd = default_shell();
+    let mut cmd = build_shell_command()?;
     if let Some(dir) = cwd.filter(|d| !d.is_empty()) {
         cmd.cwd(dir);
     }
