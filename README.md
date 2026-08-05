@@ -2,9 +2,9 @@
 
 **Status:** Concept / Early Design
 
-![VAD/OS](https://github.com/VADITIM/VAD-OS/tree/main/src/lib/assets/main.png)
-![.md](https://github.com/VADITIM/VAD-OS/tree/main/src/lib/assets/notifi.png)
-![notifi](https://github.com/VADITIM/VAD-OS/tree/main/src/lib/assets/md.png)
+![VAD/OS](src/lib/assets/main.png)
+![.md](src/lib/assets/notifi.png)
+![notifi](src/lib/assets/md.png)
 
 A cross-platform terminal for Windows and Linux that renders command output as structured markdown instead of a raw text stream.
 
