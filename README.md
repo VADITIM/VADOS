@@ -2,6 +2,8 @@
 
 **Status:** Concept / Early Design
 
+![VAD/OS](vados-concept.png)
+
 A cross-platform terminal for Windows and Linux that renders command output as structured markdown instead of a raw text stream.
 
 ## Why
