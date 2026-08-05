@@ -11,6 +11,8 @@ Cross-platform terminal (Windows + Arch) that renders command output as structur
 
 **Before writing or changing any animation code, read [ANIMATION.md](ANIMATION.md).** It is binding, not advisory — it covers the typewriter reveal, stagger timing, flood control, and cleanup requirements.
 
+**Before touching the output path (PTY read → IPC → parse → DOM), read [PERFORMANCE.md](PERFORMANCE.md).** Also binding — latency/memory/throughput budgets, IPC coalescing, scrollback virtualization, and the measurement protocol. The bar: never noticeably heavier than a standard terminal.
+
 ## Layout
 
 - `src-tauri/src/pty.rs` — PTY session, streams raw bytes to the frontend over a Tauri channel.

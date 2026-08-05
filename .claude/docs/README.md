@@ -11,6 +11,7 @@ Planning and progress tracking. Read the relevant phase doc **before** starting 
 | [tasks.md](tasks.md) | Live backlog: bugs, current issues, future feature ideas |
 | [phase-0-1-foundation.md](phase-0-1-foundation.md) | Toolchain, scaffold, working PTY terminal |
 | [phase-2-command-boundaries.md](phase-2-command-boundaries.md) | OSC 133 shell integration, output parsing |
+| [shells.md](shells.md) | Which shells are supported, tiered by OSC 133 marker fidelity |
 | [phase-3-block-renderer.md](phase-3-block-renderer.md) | Markdown blocks, live container, alt-screen fallback |
 | [phase-4-styling.md](phase-4-styling.md) | SCSS token layer, accent system, fonts |
 | [phase-5-animation.md](phase-5-animation.md) | GSAP layer — implements `../../ANIMATION.md` |
@@ -19,6 +20,6 @@ Planning and progress tracking. Read the relevant phase doc **before** starting 
 
 ## Conventions
 
-- **`ANIMATION.md` lives at the repo root, not here.** It is a binding ruleset for writing code, not a planning doc. These files plan; that file constrains.
+- **`ANIMATION.md` and `PERFORMANCE.md` live at the repo root, not here.** They are binding rulesets for writing code, not planning docs. These files plan; those files constrain.
 - Each phase doc carries **Original plan** (what was agreed, do not rewrite it) and **Status / Learned** (what actually happened). Keeping them separate is the point — drift between the two is the useful signal.
 - When a phase finishes, move anything unresolved into [tasks.md](tasks.md) rather than leaving it buried in a phase doc.
