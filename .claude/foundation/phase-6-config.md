@@ -16,6 +16,10 @@
 
   [shell]
   cwd = "~/projects"
+
+  [system]
+  default_terminal = false
+  start_as_admin   = false
   ```
 - Write defaults on first run if the file is absent.
 - **GUI → file:** settings overlay (gear, top-right) with toggles and swatches; changes write TOML immediately and apply live.
@@ -32,6 +36,8 @@ Fixed and curated — this is not an extension point.
 | Startup directory | Text input + native folder picker |
 | Accent color | Swatches: indigo (default), blue, yellow, orange |
 | Font | Three-way toggle: System / Mono / Claude Sans Modern |
+| Set as default terminal | Toggle. Windows: `DelegationConsole`/`DelegationTerminal` registry keys. Linux: `x-terminal-emulator` alternative (Debian/Ubuntu) or per-DE equivalent. Off by default — this is a system-wide change, toggling off must cleanly restore the prior default. |
+| Start as administrator / root | Toggle. Windows: requires an embedded manifest (`requestedExecutionLevel`) or a relaunch-elevated shim — a running process cannot self-elevate via UAC without one. Linux: no true equivalent; toggle instead controls whether the spawned shell is wrapped in `sudo -E`/`pkexec`. Needs a restart to take effect either way — surface that in the toggle's copy, don't silently no-op. |
 
 Panel opens in place over the terminal with a blurred backdrop — not a separate window. Animated per `ANIMATION.md`.
 
@@ -48,3 +54,5 @@ Panel opens in place over the terminal with a blurred backdrop — not a separat
 - Changing `cwd` in settings does not affect the already-running shell. Decide: apply on next launch only, or offer a restart-session action.
 - The watcher fires on the app's own writes. Debounce alone is not enough — track a write generation or compare content.
 - Accent changes must also update the xterm.js theme object, which does not read CSS vars. See [phase-4-styling.md](phase-4-styling.md).
+- **"Set as default terminal" and "Start as administrator" both need elevation to write** (registry under `HKLM`, or an admin-manifest relaunch) — the toggle flip itself must trigger a UAC/`pkexec` prompt, it cannot silently write and fail. Treat a rejected prompt as toggle-off, not an error state.
+- **"Start as administrator" changes the manifest/launch path, not runtime state** — flipping it does nothing to the current session. The toggle must say so and apply on next launch only, same open question as `cwd` above.

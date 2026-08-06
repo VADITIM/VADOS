@@ -109,15 +109,29 @@ export function parse(buffer) {
       let j = i;
       /** @type {string[]} */
       const codeLines = [];
-      while (j < lines.length && isCodeLine(lines[j])) codeLines.push(lines[j++]);
+      // An indented non-blank line inside a run is a wrapped continuation of
+      // the line above (PowerShell hard-wraps its error records mid-word), so
+      // it keeps the run alive instead of splitting it in two. Trailing
+      // continuations that no code line follows are given back.
+      let lastCode = -1;
+      while (
+        j < lines.length &&
+        (isCodeLine(lines[j]) || (codeLines.length > 0 && /^\s+\S/.test(lines[j])))
+      ) {
+        if (isCodeLine(lines[j])) lastCode = codeLines.length;
+        codeLines.push(lines[j++]);
+      }
+      codeLines.length = lastCode + 1;
       if (codeLines.length > 1) {
         flush();
         nodes.push({ kind: "code", text: codeLines.join("\n") });
-        i = j - 1;
+        i += codeLines.length - 1;
         continue;
       }
       // A single code-shaped line isn't worth a fence on its own — falls
       // through to plain/heading handling below, same as any other line.
+      // (Load-bearing: `Usage:` is symbol-dense enough to land here, and
+      // still has to reach the heading rule.)
     }
 
     // Single-line label: colon followed by more text on the *same* line, e.g.
@@ -127,7 +141,15 @@ export function parse(buffer) {
     const label = /^\s*([^\n:]+:\s+\S.*)$/.exec(line);
     if (label) {
       flush();
-      const text = label[1].trim();
+      // The label runs to the end of its paragraph, not the end of its
+      // physical line — PowerShell hard-wraps a single error record across
+      // several lines, and only bolding the first one splits it visually. A
+      // blank line or a code-shaped line ends it.
+      const rest = [];
+      let k = i + 1;
+      while (k < lines.length && lines[k].trim() !== "" && !isCodeLine(lines[k])) rest.push(lines[k++]);
+      i = k - 1;
+      const text = [label[1], ...rest].join("\n").trim();
       const t = tone(text);
       if (t) {
         nodes.push({ kind: "heading", level: 3, text, tone: t });

@@ -131,4 +131,31 @@ assert.equal(
 
 assert.equal(toMarkdown(parse("Usage: run with --foo")), "**Usage: run with `--foo`**");
 
+// A PowerShell error record: the `+` carets and the indented `+ CategoryInfo`
+// columns stay one code block, including the hard-wrapped `   n` continuation
+// in the middle of it, and none of the ` : ` columns read as a label.
+const ps = `+ fsd
++ ~~~
+    + CategoryInfo          : ObjectNotFound: (fsd:String) [], CommandNotFoundExceptio
+   n
+    + FullyQualifiedErrorId : CommandNotFoundException`;
+assert.deepEqual(parse(ps), [{ kind: "code", text: ps }]);
+
+// A trailing indented continuation with no code line after it is not swallowed.
+assert.deepEqual(parse("+ a\n+ b\n   tail"), [
+  { kind: "code", text: "+ a\n+ b" },
+  { kind: "text", parts: [{ code: false, text: "   tail" }] },
+]);
+
+// A label's bold covers the whole hard-wrapped paragraph, not just the first
+// physical line; the code-shaped `+ fsd` below ends it.
+assert.deepEqual(parse("fsd : Die Benennung\nwurde nicht erkannt\n+ fsd\n+ ~~~"), [
+  {
+    kind: "text",
+    bold: true,
+    parts: [{ code: false, text: "fsd : Die Benennung\nwurde nicht erkannt" }],
+  },
+  { kind: "code", text: "+ fsd\n+ ~~~" },
+]);
+
 console.log("parse.js ok");

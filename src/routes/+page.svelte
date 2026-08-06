@@ -11,6 +11,10 @@
 
   gsap.registerPlugin(ScrollToPlugin);
 
+  // Repeated enough to cover 80dvw at any reasonable window width; the
+  // divider element clips it to width, so overshoot is free and safe.
+  const dividerLine = "<<>>".repeat(60);
+
   type Block = {
     id: number;
     cwd: string;
@@ -55,7 +59,11 @@
   // column after it) and across a chunk boundary landing between the prompt
   // text and the B marker, so it doesn't yet reflect this prompt's real
   // width. Re-matching the literal prefix every time has no state to go stale.
-  const PS_PROMPT = /^PS\s+\S.*?>\s/;
+  // The trailing space is optional: rows come out of `translateToString(true)`,
+  // which trims trailing whitespace, so an empty prompt row is `PS C:\x>` with
+  // nothing after the `>`. Requiring the space meant the whole prompt leaked
+  // into the input bar until the first character was typed.
+  const PS_PROMPT = /^PS\s+\S.*?>\s?/;
   // The shell writes the prompt text and the 133;B marker as one logical
   // unit, but a PTY read can split them across two chunks — the terminal's
   // 8 KB read boundary has no relation to the shell's write boundaries. Until
@@ -70,6 +78,9 @@
   // nothing to attribute it to, so it's dropped rather than block-ified
   // until the first prompt has actually completed.
   let booted = false;
+  // The block whose command took over the screen. Its output lives in the
+  // alternate buffer and is wiped on exit, so it never gets snapshotted.
+  let rawBlockId = -1;
 
   // Markers live outside `blocks` on purpose: they are live xterm objects and
   // must not be wrapped in Svelte's reactive proxy.
@@ -105,6 +116,7 @@
   // reproduces all of that as literal garbage. The marker tracks the block's
   // first row as the buffer scrolls and trims.
   function snapshot(block: Block) {
+    if (block.id === rawBlockId) return;
     const marker = markers.get(block.id);
     if (!marker || marker.line < 0 || !term) return;
     const buf = term.buffer.active;
@@ -262,18 +274,30 @@
       const path = data.split("://")[1] ?? data;
       const slash = path.indexOf("/");
       if (slash >= 0) {
-        lastCwd = decodeURIComponent(path.slice(slash));
+        // Windows reports `/C:/Users/x` — the leading slash is part of the URL
+        // path, not the filesystem path, and shows up in the prompt if kept.
+        lastCwd = decodeURIComponent(path.slice(slash)).replace(/^\/(?=[A-Za-z]:)/, "");
         promptCwd = lastCwd;
       }
       return true;
     });
 
-    // Alt-screen apps (vim, htop, claude) get the raw xterm view. xterm already
-    // tracks the buffer swap, so there's nothing to sniff out of the stream.
-    t.buffer.onBufferChange(() => {
-      mode = t.buffer.active.type === "alternate" ? "raw" : "blocks";
+    // Alt-screen apps (vim, htop, claude) get the raw xterm view. xterm tracks
+    // the buffer swap itself, so there's nothing to sniff out of the stream.
+    // `onBufferChange` is the signal, but it only fires on a real swap event;
+    // the write callback re-checks the same flag every chunk so a swap that
+    // lands without one still flips the view on the very next byte.
+    function syncMode() {
+      const next = t.buffer.active.type === "alternate" ? "raw" : "blocks";
+      if (next === mode) return;
+      // The block that launched the app keeps its heading and result. Its rows
+      // are gone from the buffer the marker points into, so anything read back
+      // now would be the app's leftover screen, not the command's output.
+      if (next === "raw") rawBlockId = currentBlock()?.id ?? -1;
+      mode = next;
       t.focus();
-    });
+    }
+    t.buffer.onBufferChange(syncMode);
 
     // Raw bytes always go to xterm, even while it's visually hidden in block
     // mode: xterm's VT emulation is what answers control queries the shell
@@ -286,6 +310,7 @@
       // before that would snapshot a stale screen, and the OSC handlers above
       // have all fired by then.
       t.write(new Uint8Array(bytes), () => {
+        syncMode();
         if (mode === "raw") return;
         const buf = t.buffer.active;
 
@@ -361,8 +386,14 @@
     <div class="scroll" class:visible={mode === "blocks"} bind:this={scrollEl}>
       {#each blocks as block (block.id)}
         {#if !block.md}
-          <pre class="banner">{block.buffer}</pre>
-          <div class="divider" role="separator"></div>
+          <div class="banner-center">
+            <pre class="banner">{block.buffer}</pre>
+          </div>
+          <div class="banner-divider">{dividerLine}</div>
+          <div class="banner-sub">
+            <div>VAD/OS | Terminal</div>
+            <div>/help for commands</div>
+          </div>
         {:else}
           <section
             class="block"
@@ -482,6 +513,24 @@
        the view to the bottom on long output. This is the standard fix for
        that class of bug in any growing scroll feed. */
     overflow-anchor: none;
+    scrollbar-color: #201f26 transparent;
+  }
+
+  .scroll::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scroll::-webkit-scrollbar-thumb {
+    background: #201f26;
+    border-radius: 6px;
+  }
+
+  .scroll::-webkit-scrollbar-thumb:hover {
+    background: #2c2b33;
   }
 
   .xterm-wrap {
@@ -510,6 +559,30 @@
     margin-bottom: 6px;
   }
 
+  /* Parent centers the atomic inline-block as one unit — the pre's own
+     lines never reflow relative to each other, only the whole block moves. */
+  .banner-center {
+    text-align: center;
+  }
+
+  .banner-center .banner {
+    display: inline-block;
+    text-align: left;
+  }
+
+  .banner-divider {
+    width: 80dvw;
+    max-width: 100%;
+    margin: 4px auto 2px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-align: left;
+    color: #7e55dd;
+    font-family: Consolas, "DejaVu Sans Mono", monospace;
+    font-size: 14px;
+    line-height: 1;
+  }
+
   .banner {
     margin: 0;
     padding: 10px 14px;
@@ -517,6 +590,15 @@
     white-space: pre;
     font-family: Consolas, "DejaVu Sans Mono", monospace;
     font-size: 14px;
+  }
+
+  .banner-sub {
+    padding: 4px 14px 0;
+    color: rgba(255, 255, 255, 0.5);
+    font-family: Consolas, "DejaVu Sans Mono", monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: center;
   }
 
   /* Centered per the concept: a short rule, not a full-width bar. */

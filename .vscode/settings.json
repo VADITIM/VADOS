@@ -1,3 +1,16 @@
 {
-  "svelte.enable-ts-plugin": true
+  "svelte.enable-ts-plugin": true,
+  "files.exclude": {
+    "node_modules": true,
+    "**/node_modules": true,
+    ".svelte-kit": true,
+    "vite.config.*": true,
+    "tsconfig.json": true,
+    "svelte.config.*": true,
+    "package.json": true,
+    "package-lock.json": true,
+    "src-tauri/tauri.conf.json": true,
+    "src-tauri/Cargo.toml": true,
+    "src-tauri/Cargo.lock": true
+  }
 }
