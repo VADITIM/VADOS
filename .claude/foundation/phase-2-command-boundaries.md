@@ -43,8 +43,14 @@ Alt-screen detection belongs in this parser, even though it is consumed in Phase
 ## Open questions
 
 - Where do the shell snippets live on disk, and how are they referenced as Tauri resources on both platforms?
-- ~~Fish has no injection flag equivalent.~~ **Resolved:** fish has `--init-command`. Use it; no manual rc step needed. See [shells.md](shells.md).
+- ~~Fish has no injection flag equivalent.~~ **Resolved:** fish has `--init-command`. Use it; no manual rc step needed. See [../shells.md](../shells.md).
+
+## The OSC surface grows later
+
+Phase 2 owns OSC 133 (boundaries) and OSC 7 (cwd). [phase-8-markdown-engine.md](phase-8-markdown-engine.md) adds a third: a private-use marker by which a program declares "the following output is markdown".
+
+Nothing to build now, but the handler registration should read as a list of independent handlers rather than one branching function, so adding the third is a registration and not a rewrite. Same rule as everything else here — the handler consumes its sequence so it never reaches the screen, and it runs mid-parse where the cursor actually is.
 
 ## Beyond the big four
 
-Shell support past bash/zsh/fish/PowerShell — Nushell, Xonsh, Elvish, cmd, dash/ksh/mksh, tcsh — is tiered by marker fidelity in [shells.md](shells.md). The parser here does not change per shell; only the injected snippet does.
+Shell support past bash/zsh/fish/PowerShell — Nushell, Xonsh, Elvish, cmd, dash/ksh/mksh, tcsh — is tiered by marker fidelity in [../shells.md](../shells.md). The parser here does not change per shell; only the injected snippet does.

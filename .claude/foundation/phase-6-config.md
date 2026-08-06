@@ -37,6 +37,8 @@ Fixed and curated — this is not an extension point.
 | Accent color | Swatches: indigo (default), blue, yellow, orange |
 | Font | Three-way toggle: System / Mono / Claude Sans Modern |
 | Set as default terminal | Toggle. Windows: `DelegationConsole`/`DelegationTerminal` registry keys. Linux: `x-terminal-emulator` alternative (Debian/Ubuntu) or per-DE equivalent. Off by default — this is a system-wide change, toggling off must cleanly restore the prior default. |
+| Shell | Dropdown of **detected** shells, plus a custom binary field. Owned by [phase-12-shell-hosting.md](phase-12-shell-hosting.md); the schema slot belongs here. Never list a shell that is not installed. |
+| Theme | Built-in themes plus anything in the themes directory. Owned by [phase-11-theme-engine.md](phase-11-theme-engine.md). The accent swatches stay the primary control; themes sit behind them, not in front. |
 | Start as administrator / root | Toggle. Windows: requires an embedded manifest (`requestedExecutionLevel`) or a relaunch-elevated shim — a running process cannot self-elevate via UAC without one. Linux: no true equivalent; toggle instead controls whether the spawned shell is wrapped in `sudo -E`/`pkexec`. Needs a restart to take effect either way — surface that in the toggle's copy, don't silently no-op. |
 
 Panel opens in place over the terminal with a blurred backdrop — not a separate window. Animated per `ANIMATION.md`.
@@ -55,4 +57,5 @@ Panel opens in place over the terminal with a blurred backdrop — not a separat
 - The watcher fires on the app's own writes. Debounce alone is not enough — track a write generation or compare content.
 - Accent changes must also update the xterm.js theme object, which does not read CSS vars. See [phase-4-styling.md](phase-4-styling.md).
 - **"Set as default terminal" and "Start as administrator" both need elevation to write** (registry under `HKLM`, or an admin-manifest relaunch) — the toggle flip itself must trigger a UAC/`pkexec` prompt, it cannot silently write and fail. Treat a rejected prompt as toggle-off, not an error state.
+- **The schema grows in two directions later.** [phase-11-theme-engine.md](phase-11-theme-engine.md) adds a themes directory beside `config.toml`, and [phase-12-shell-hosting.md](phase-12-shell-hosting.md) adds a `[[shell.profiles]]` array. Neither needs building now, but the watcher should watch the config *directory*, not the single file, or the theme reload later needs a second watcher for no reason.
 - **"Start as administrator" changes the manifest/launch path, not runtime state** — flipping it does nothing to the current session. The toggle must say so and apply on next launch only, same open question as `cwd` above.

@@ -25,11 +25,16 @@
  *     `key=value`) become inline code — same shape test as the block rule,
  *     just applied per-token instead of per-line
  *
+ *   - inside a code block, three token *shapes* are tinted: CLI flags,
+ *     `<placeholder>`s, and quoted strings. Colour only — see `codeSpans`
+ *
  * @typedef {"warn" | "ok" | null} Tone
  * @typedef {{ code: boolean, text: string }} TextPart
+ * @typedef {"flag" | "var" | "str" | null} CodeToken
+ * @typedef {{ token: CodeToken, text: string }} CodeSpan
  * @typedef {{ kind: "heading", level: 2 | 3, text: string, tone: Tone }
  *          | { kind: "list", items: string[] }
- *          | { kind: "code", text: string }
+ *          | { kind: "code", text: string, spans: CodeSpan[] }
  *          | { kind: "text", parts: TextPart[], bold?: boolean }} Node
  */
 
@@ -83,6 +88,60 @@ function inlineParts(text) {
   return parts.length ? parts : [{ code: false, text }];
 }
 
+// Token shapes inside a code block. Shape, not language — same principle as
+// `isCodeLine`: this never decides what language a block is, only which runs of
+// characters read as a flag, a placeholder, or a quoted string. Those three
+// carry the same meaning in `git diff --help`, a shell script, and a Rust
+// error, which is why they are worth tinting and keywords are not.
+//
+//  - flag: `-p`, `--patch`, `--[no-]color`. A **single** dash takes exactly
+//    one letter and nothing word-like after it, which is what short flags
+//    actually look like (`-p`, `-U`, `-z`) and what keeps a removed diff line
+//    (`-let x = 1;`) from reading as one — the case the self-check caught.
+//    A double dash takes a long name. Bracket groups are only absorbed when
+//    they hold word characters, so `--stat[=<width>]` yields the flag
+//    `--stat` and leaves `<width>` to be matched as a placeholder in its own
+//    right.
+//  - var: `<n>`, `<path>`, `<param1>`. No whitespace inside, so a stray `<`
+//    in prose cannot swallow the rest of a line.
+//  - str: single or double quoted, non-greedy, never crossing a line break.
+const CODE_SPAN = new RegExp(
+  [
+    /(?<flag>(?<![\w-])(?:--(?:\[[\w-]+\])?[A-Za-z][\w-]*(?:\[[\w-]+\][\w-]*)*|-[A-Za-z](?![\w-])))/.source,
+    /(?<var><[^<>\s]+>)/.source,
+    /(?<str>'[^'\n]*'|"[^"\n]*")/.source,
+  ].join("|"),
+  "g",
+);
+
+/**
+ * Split a code block into tinted and untinted runs.
+ *
+ * Returns spans rather than a marked-up string, for the same reason the rest of
+ * this file does: the renderer builds real DOM from them and never re-parses
+ * anything. Concatenating every `text` reproduces the input exactly, which is
+ * what keeps the block's raw bytes recoverable.
+ *
+ * @param {string} text
+ * @returns {CodeSpan[]}
+ */
+export function codeSpans(text) {
+  /** @type {CodeSpan[]} */
+  const spans = [];
+  let last = 0;
+  for (const m of text.matchAll(CODE_SPAN)) {
+    if (m.index > last) spans.push({ token: null, text: text.slice(last, m.index) });
+    const groups = /** @type {Record<string, string | undefined>} */ (m.groups ?? {});
+    const token = /** @type {CodeToken} */ (
+      groups.flag ? "flag" : groups.var ? "var" : groups.str ? "str" : null
+    );
+    spans.push({ token, text: m[0] });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) spans.push({ token: null, text: text.slice(last) });
+  return spans.length ? spans : [{ token: null, text }];
+}
+
 /**
  * @param {string} buffer
  * @returns {Node[]}
@@ -124,7 +183,8 @@ export function parse(buffer) {
       codeLines.length = lastCode + 1;
       if (codeLines.length > 1) {
         flush();
-        nodes.push({ kind: "code", text: codeLines.join("\n") });
+        const codeText = codeLines.join("\n");
+        nodes.push({ kind: "code", text: codeText, spans: codeSpans(codeText) });
         i += codeLines.length - 1;
         continue;
       }
@@ -132,6 +192,17 @@ export function parse(buffer) {
       // through to plain/heading handling below, same as any other line.
       // (Load-bearing: `Usage:` is symbol-dense enough to land here, and
       // still has to reach the heading rule.)
+    }
+
+    // y/n prompt: question mark followed by a (y/n)-style hint, e.g.
+    // "Overwrite file? (y/N)" or "Continue? [Y/n]:". No colon required, so it
+    // has to be checked before the label/heading rules below, which key off
+    // colons and would otherwise swallow it as plain prose.
+    const ynPrompt = /^\s*(.+\?\s*[[(][YyNn]\/[YyNn][\])]:?)\s*$/.exec(line);
+    if (ynPrompt) {
+      flush();
+      nodes.push({ kind: "text", parts: inlineParts(ynPrompt[1]), bold: true });
+      continue;
     }
 
     // Single-line label: colon followed by more text on the *same* line, e.g.

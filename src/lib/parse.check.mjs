@@ -1,7 +1,13 @@
 // Self-check for parse.js. Plain node, no test framework:
 //   node src/lib/parse.check.mjs
 import assert from "node:assert/strict";
-import { parse, toMarkdown } from "./parse.js";
+import { parse, toMarkdown, codeSpans } from "./parse.js";
+
+// Code nodes carry their token spans. The assertions below are about block
+// *structure*, so they build the spans rather than restate them; the spans
+// themselves are checked directly further down.
+/** @param {string} text */
+const code = (text) => ({ kind: "code", text, spans: codeSpans(text) });
 
 // The npm help case both prose rules were written against: "Usage:" has
 // several lines under it and becomes a list; "All commands:" has one and
@@ -59,13 +65,13 @@ const diff = `diff --git a/foo.rs b/foo.rs
 @@ -1,2 +1,2 @@
 -let x = 1;
 +let x = 2;`;
-assert.deepEqual(parse(diff), [{ kind: "code", text: diff }]);
+assert.deepEqual(parse(diff), [code(diff)]);
 
 const json = `{
   "name": "vados",
   "private": true
 }`;
-assert.deepEqual(parse(json), [{ kind: "code", text: json }]);
+assert.deepEqual(parse(json), [code(json)]);
 
 // A single code-shaped line isn't worth fencing on its own.
 assert.deepEqual(parse("$ echo hi"), [
@@ -139,11 +145,11 @@ const ps = `+ fsd
     + CategoryInfo          : ObjectNotFound: (fsd:String) [], CommandNotFoundExceptio
    n
     + FullyQualifiedErrorId : CommandNotFoundException`;
-assert.deepEqual(parse(ps), [{ kind: "code", text: ps }]);
+assert.deepEqual(parse(ps), [code(ps)]);
 
 // A trailing indented continuation with no code line after it is not swallowed.
 assert.deepEqual(parse("+ a\n+ b\n   tail"), [
-  { kind: "code", text: "+ a\n+ b" },
+  code("+ a\n+ b"),
   { kind: "text", parts: [{ code: false, text: "   tail" }] },
 ]);
 
@@ -155,7 +161,81 @@ assert.deepEqual(parse("fsd : Die Benennung\nwurde nicht erkannt\n+ fsd\n+ ~~~")
     bold: true,
     parts: [{ code: false, text: "fsd : Die Benennung\nwurde nicht erkannt" }],
   },
-  { kind: "code", text: "+ fsd\n+ ~~~" },
+  code("+ fsd\n+ ~~~"),
 ]);
+
+// A y/n prompt (no colon) becomes bold prose so it stands out, same as a label.
+assert.deepEqual(parse("Overwrite file? (y/N)"), [
+  {
+    kind: "text",
+    bold: true,
+    parts: [
+      { code: false, text: "Overwrite file? (y" },
+      { code: true, text: "/N" },
+      { code: false, text: ")" },
+    ],
+  },
+]);
+assert.deepEqual(parse("Continue? [Y/n]:"), [
+  {
+    kind: "text",
+    bold: true,
+    parts: [
+      { code: false, text: "Continue? [Y" },
+      { code: true, text: "/n" },
+      { code: false, text: "]:" },
+    ],
+  },
+]);
+
+// ── code block token spans ──────────────────────────────────────────────────
+
+// The `git diff --help` line the feature was asked for: the flag, the two
+// placeholders, and the untinted text between them.
+assert.deepEqual(codeSpans("    -U, --unified[=<n>]   generate diffs with <n> lines context"), [
+  { token: null, text: "    " },
+  { token: "flag", text: "-U" },
+  { token: null, text: ", " },
+  { token: "flag", text: "--unified" },
+  { token: null, text: "[=" },
+  { token: "var", text: "<n>" },
+  { token: null, text: "]   generate diffs with " },
+  { token: "var", text: "<n>" },
+  { token: null, text: " lines context" },
+]);
+
+// A bracket group inside a flag name is part of the flag; one introducing a
+// value is not, so `--stat[=<width>]` leaves `<width>` to match on its own.
+assert.deepEqual(codeSpans("--[no-]color[=<when>] show colored diff"), [
+  { token: "flag", text: "--[no-]color" },
+  { token: null, text: "[=" },
+  { token: "var", text: "<when>" },
+  { token: null, text: "] show colored diff" },
+]);
+
+assert.deepEqual(codeSpans("synonym for '-p --raw'"), [
+  { token: null, text: "synonym for " },
+  { token: "str", text: "'-p --raw'" },
+]);
+
+// The dashes must be followed by a letter, so a diff's hunk header and its
+// removed lines are not littered with false flags. `--git` is a real one.
+assert.deepEqual(codeSpans("@@ -1,2 +1,2 @@"), [{ token: null, text: "@@ -1,2 +1,2 @@" }]);
+assert.deepEqual(codeSpans("-let x = 1;"), [{ token: null, text: "-let x = 1;" }]);
+
+// The invariant that keeps a block's raw bytes recoverable: concatenating
+// every span reproduces the input exactly, tinted or not.
+for (const sample of [diff, json, ps, npm, "plain prose with no tokens at all"]) {
+  assert.equal(
+    codeSpans(sample)
+      .map((s) => s.text)
+      .join(""),
+    sample,
+  );
+}
+
+// Spans are a render concern only — `copy as markdown` still emits the raw
+// text inside a fence, because markdown code fences carry no inline markup.
+assert.equal(toMarkdown(parse(diff)), "```\n" + diff + "\n```");
 
 console.log("parse.js ok");

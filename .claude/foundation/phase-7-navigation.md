@@ -14,6 +14,12 @@ From the original framing: *"a beautifully animated home for terminal rats, wher
 
 Navigation is minimal GUI, not a file manager. It shows where you are and what you can run; it does not try to replace `ls`.
 
+## Block focus is the real deliverable
+
+"Jump to previous/next command" sounds like a convenience. It is actually the **focus model**, and three later features consume it: fold/unfold ([phase-8-markdown-engine.md](phase-8-markdown-engine.md)), the raw toggle and per-block export ([phase-10-document-view.md](phase-10-document-view.md)), and copy, which currently has no keyboard path at all.
+
+So build exactly one notion of "the focused block" and let everything key off it. Two competing focus states — one for keyboard nav, one for whichever block the pointer is over — is the version of this that quietly breaks every consumer.
+
 ## Verify
 
 - `open README.md` launches the configured editor.

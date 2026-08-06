@@ -55,7 +55,13 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(8);
 - **One decoder instance.** A single `TextDecoder` with `{ stream: true }` for the session lifetime. Constructing one per chunk is both slow and wrong — it breaks multi-byte characters split across chunk boundaries.
 - **Parse per chunk, not per line.** Scan the incoming chunk once. Do not `split("\n")` into an array of strings and then loop it — that is two passes and N allocations for what one pass does.
 - **No regex in the hot path.** Escape-sequence and OSC 133 detection is byte/char comparison. Regexes are for config parsing and markdown, not for every line of `npm install`.
-- **Markdown detection is cheap and lazy.** Cheap heuristic first (does the block plausibly contain markdown?); only run the real parser on blocks that pass. Never parse markdown on a live-streaming block — only on completion, when the block's output is final.
+- **Markdown detection is cheap and lazy.** Cheap heuristic first (does the block plausibly contain markdown?); only run the real parser on blocks that pass. The classifier runs once per block and its verdict is final — reclassifying mid-stream means reflowing a block under the reader, which costs a frame *and* the reader's place.
+- **Incremental markdown parsing is allowed only under all three of these.** The original rule here was "never parse a streaming block"; [../foundation/phase-8-markdown-engine.md](../foundation/phase-8-markdown-engine.md) needs live rendering, so the ban is replaced by conditions rather than quietly dropped:
+  1. **Parse forward from the last stable boundary**, never from the top of the block. Re-parsing the whole buffer per chunk is O(n²) over a long command and is still banned outright.
+  2. **Coalesce to one parse per frame**, not one per chunk. Twenty chunks in a frame is one parse.
+  3. **Fall back to the raw live container under flood.** Same threshold that governs the reveal — if rows are arriving faster than they can be revealed, they are arriving faster than they are worth parsing. Render raw, parse once on completion.
+
+  If the boundary logic cannot be made correct for unterminated fenced code, the fallback is the original rule: raw while streaming, parse on completion. That is a correctness call, not a performance one, and it is Phase 8's to make.
 
 ## Frontend — the DOM
 
@@ -69,6 +75,15 @@ This is where a web-tech terminal wins or loses against native.
 - **`content-visibility: auto` on off-screen blocks.** The browser skips rendering work for blocks scrolled out of view — this is the native platform doing virtualization work for us, for free.
 - **Revert `SplitText` after reveal.** Already mandated by `ANIMATION.md`; restated here because it is a memory rule as much as an animation one. One `<div>` per row, never reverted, is exactly failure mode #1.
 - **No per-row Svelte components.** A `{#each}` over rows with a component per row is thousands of component instances. Rows are strings rendered into a block; the component boundary is the *block*.
+
+## Weight from the expansion phases
+
+Every feature in Phases 8–12 adds bytes, memory, or work to a process whose whole pitch is that it does not feel heavier than a real terminal. Four rules keep them honest.
+
+- **Nothing new loads at startup.** Mermaid, a markdown parser, the export path, the PDF webview — all lazy, all loaded on first use. The cold-start budget (400 ms) does not move because a feature was added that most sessions never touch. Mermaid alone is larger than everything currently in the bundle.
+- **Retained raw snapshots are counted.** Every block keeps the bytes it rendered from ([../decisions.md](../decisions.md)), so scrollback memory is now text *plus* AST *plus* rendered DOM. The 250 MB / 100k-line budget covers all three; it does not get raised to accommodate them. If it cannot be met, the AST is what gets dropped and re-derived on demand, not the raw bytes.
+- **Decoded images are the sharpest edge.** They dwarf text and they are retained for the block's life. Cap decoded dimensions, and treat images as the first thing evicted when scrollback virtualization lands.
+- **Export never runs on the UI thread.** A session export is large-scale string building. Chunk it or move it off-thread; a five-second freeze on "Export" is the same failure as a five-second freeze on `cat`.
 
 ## Animation cost
 
@@ -97,7 +112,7 @@ A performance claim without a measurement is a guess. Before and after any chang
 - **Memory:** RSS at start, after 100k lines, and after clearing scrollback. The third number matters most — if it does not return near the first, something leaks.
 - **Idle:** process CPU over 60 s with the window focused and nothing running. Must be flat zero.
 
-Keep a checked-in generator for the test log so the numbers are comparable across sessions and machines. Record results in [.claude/docs/tasks.md](.claude/docs/tasks.md) with the commit hash — a budget with no history cannot show regression.
+Keep a checked-in generator for the test log so the numbers are comparable across sessions and machines. Record results in [../tasks.md](../tasks.md) with the commit hash — a budget with no history cannot show regression.
 
 Build measurements in release mode only. Dev-build numbers are meaningless and quoting them is worse than not measuring.
 
@@ -108,7 +123,7 @@ Build measurements in release mode only. Dev-build numbers are meaningless and q
 - ❌ Allocate or run a regex per line in the hot path.
 - ❌ Interleave layout reads with DOM writes.
 - ❌ Run a timer, poll, or `requestAnimationFrame` loop while idle.
-- ❌ Parse markdown on a block that is still streaming.
+- ❌ Re-parse a whole block from the top on every chunk.
 - ❌ Add a dependency to the output path. Everything here is a few hundred lines of plain code; a library in the hot path is a black box you cannot profile.
 - ❌ Optimize anything outside the output path before the budgets above are met.
 

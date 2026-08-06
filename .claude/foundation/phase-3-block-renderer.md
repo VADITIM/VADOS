@@ -13,9 +13,11 @@
 
 ## Still to do
 
-- More parser rules, or a swap to a real renderer — see [tasks.md](tasks.md).
-- Error / note output as fenced code blocks — needs stderr detection, see [tasks.md](tasks.md).
-- The input-to-block transition animation ("shoot out" the typed line into a new block as one module) — Phase 5, see [../../ANIMATION.md](../../ANIMATION.md).
+Phase 3 closes once blocks render reliably. The renderer's future — a real parser, the classifier, streaming, folding — is [phase-8-markdown-engine.md](phase-8-markdown-engine.md), not more scope here. Anything below that is not a bug in the existing structure belongs there.
+
+- More parser rules, or a swap to a real renderer — Phase 8 owns the decision; see [../tasks.md](../tasks.md).
+- Error / note output as fenced code blocks — needs stderr detection, see [../tasks.md](../tasks.md).
+- The input-to-block transition animation ("shoot out" the typed line into a new block as one module) — Phase 5, see [../docs/ANIMATION.md](../docs/ANIMATION.md).
 
 ## Original plan
 
@@ -56,7 +58,7 @@
 
 - **ASCII art and banners must survive.** They live in the `<pre>` container with `white-space: pre` and monospace. Prose markdown styling must never touch them. This is the single most likely thing to break.
 - Carriage returns (`\r`) used for in-place progress bar redraws must be handled — naive appending turns one progress bar into hundreds of lines.
-- Long scrollback: consider virtualising or capping retained blocks. See [tasks.md](tasks.md).
+- Long scrollback: consider virtualising or capping retained blocks. See [../tasks.md](../tasks.md).
 
 ## Open questions
 

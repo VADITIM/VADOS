@@ -2,6 +2,8 @@
 
 Which shells VAD/OS can spawn, and — the part that actually matters — how much block fidelity each one can give us.
 
+This file is the **capability analysis**: what each shell can emit and what that costs. The machinery that lets a user pick one — config profiles, runtime detection, WSL and Git Bash on Windows, and stripping the PowerShell assumptions out of the frontend — is [foundation/phase-12-shell-hosting.md](foundation/phase-12-shell-hosting.md).
+
 ## The real axis
 
 "Supporting a shell" is not a spawn-a-process problem. Every shell in this document already runs fine under portable-pty today; point the config at a binary and it works. What differs is whether the shell can emit **OSC 133** markers, because those are what produce blocks. Without them there is no block boundary, no exit code, no result heading — just a scrolling stream, which is the thing this terminal exists not to be.
@@ -100,7 +102,7 @@ The original list put Nushell and Xonsh first for UX reasons and that holds; it 
 - **Wrap, never clobber, an existing prompt.** Applies to every shell where the prompt is a function or callable: PowerShell, fish, Xonsh, Elvish.
 - **Detect available shells at runtime** and only list what exists on the machine. A settings dropdown offering `elvish` on a box without it is a bug generator.
 - **The parser does not change per shell.** OSC 133 is OSC 133. If a shell needs special-casing in the frontend parser, the snippet is wrong — fix the snippet.
-- Nothing here touches [../../PERFORMANCE.md](../../PERFORMANCE.md) budgets: markers are a handful of bytes per prompt, and the parser already scans every byte once regardless.
+- Nothing here touches [docs/PERFORMANCE.md](docs/PERFORMANCE.md) budgets: markers are a handful of bytes per prompt, and the parser already scans every byte once regardless.
 
 ## Open
 
