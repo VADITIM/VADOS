@@ -21,7 +21,7 @@
 
 - Rust 1.97.1 + cargo installed. MSVC linker confirmed working — full Tauri build links clean.
 - Scaffolded SvelteKit + TS. Generated into a scratchpad dir and moved in, because the repo root already held `README.md` and `vados-concept.png`; the original README was preserved.
-- `src-tauri/src/pty.rs` — `pty_spawn` / `pty_write` / `pty_resize`, reader thread streaming 8 KB chunks as `InvokeResponseBody::Raw`.
+- `src-tauri/src/pty.rs` — `start` (called from `setup`, before the webview boots) plus `pty_attach` / `pty_write` / `pty_resize`, reader thread streaming 8 KB chunks as `InvokeResponseBody::Raw` into a channel, or into a backlog buffer until the frontend attaches.
 - `src-tauri/src/lib.rs` — commands registered, `PtyState` managed.
 - `src/routes/+page.svelte` — full-window xterm.js + `FitAddon`, `ResizeObserver` → `pty_resize`.
 - Builds clean, app launches, no runtime errors.

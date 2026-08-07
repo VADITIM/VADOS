@@ -22,7 +22,15 @@ Settled. Check here before re-opening any of these.
 
 **No plugin system.** Rejected. Settings are a fixed, curated GUI, not an extension surface.
 
-**Settings are a GUI overlay, not a window.** Opens on Esc, in place over the terminal with a blurred backdrop.
+**Settings are a GUI overlay, not a window.** Opens on Esc, in place over the terminal with a blurred backdrop, centred in the window. Centred rather than docked to an edge is the same rule as everything below: an edge-docked panel is a drawer, and this is not one.
+
+**Esc is handled on the window, not in the terminal's key handler.** The terminal's handler only runs while its textarea has focus, so it silently stopped working the moment the user clicked anything inside the panel — which is exactly when they want to press Esc. The terminal's handler keeps only the `preventDefault`, so the shell still never sees the key in block mode.
+
+**Every path that closes a surface hands focus back to the input.** The terminal is the input engine even when it is invisible, and it cannot be clicked to regain focus. A close path that forgets this leaves a user typing into nothing, with no visible sign of why — the most expensive failure in the app for how cheap it is to prevent.
+
+**File drops go through the native drag-drop, never the HTML5 `drop` event.** This is the fix for the Linux problem, not a preference. Under webkit2gtk an HTML5 file drop only materialises when the drag source offers `text/uri-list` in a form the webview recognises, and many editors and file managers offer a private target first — which is what "drag and drop works in some apps, sometimes" actually is. The native path registers a drag destination on the *window* (GTK on Linux, OLE on Windows) and hands over resolved paths, so it sees drags the DOM is never told about, on one code path for both platforms. The webview's own drag handling has to stay off for this, which is the default; turning it back on to get HTML5 drops would take these events away.
+
+A dropped path is written at the prompt as an argument and nothing runs. A drop is a noun, not a sentence — what to do with the file is still the user's to finish typing.
 
 **The scrollbar is drawn over the output container, not laid out inside it.** A classic scrollbar takes layout width on one side only, so every module sits off-centre by exactly its width. Chromium dropped `overflow: overlay`, and `scrollbar-gutter: stable both-edges` solves the symmetry by reserving the gutter twice — paying the width on both sides instead of neither. So the native bar is hidden and a thumb is positioned over the side gap. It is draggable; a scroll indicator you cannot grab is a downgrade from the thing it replaced.
 
@@ -33,6 +41,12 @@ Settled. Check here before re-opening any of these.
 The correction that took a second pass: a single proportional width is not enough on its own. The panel's contents — labels, hints, swatches — do not shrink with the window, so a flat `30dvw` goes unreadable long before it goes small. The shape that holds is `clamp(30dvw, <preference>, 88dvw)`: **both bounds are viewport units**, so the panel takes a larger share of a narrow window and a smaller one of a wide window, with no pixel floor anywhere. Type is the exception and stays in `rem` — it should track the reader's font size, not the window.
 
 Two consequences that are not obvious: a floating surface needs real elevation or the inset reads as a rendering gap rather than a choice, and the entrance motion has to match — a lateral slide from the right is the tell of a drawer, so floating panels rise into place instead.
+
+**The reveal an element gets is decided by whether it can still change, and that is decided in the reveal pass, never at mount.** At mount nothing has arrived yet, so nothing is knowable — the pass asks instead which element is the last one inside a block that has not closed. That one types; everything above it is finished and gets the static reveal. Typing out text that was already complete is what made the typewriter look messy: it was animating the wrong thing, not animating wrongly. `REVEAL_MODES` keeps whole-typewriter available as the A/B control while the two are compared; a switch to settle a question with, not a permanent preference.
+
+**The parse is the identification for the animation.** The parser already decided what every run of text is, and the renderer wrote that decision onto the element as a class. The animation reads it back rather than re-deriving it, so it knows nothing about markdown and cannot disagree with the parser about what a line contains. Adding a token kind is a row in the parser and a row in `reveal-plan.js` — never a new code path in the animation.
+
+**Colour decides which reveal a run of text gets, and saturation decides when.** A colour is the parser saying *this run means something specific*: anything tinted is a label and sweeps under an accent bar, anything grey is prose and rises in the character wave. Tiers play most-saturated first — status colours, then accent-filled tokens, then the complement, then the accent text, then the softest tint — because the order the eye receives them in should be the order of how much they matter. An empty tier is skipped rather than held open, so the number of beats is the number of *kinds of thing* in the line.
 
 **Fonts are a scope rule, not a font picker.** Two slots — `--font-outside` and `--font-inside` — and a mode is a pair of assignments to them, so adding a mode is a row in `FONT_MODES` and nothing else. "Modern" means mono everywhere; the name predates the decision and was kept because it is what the README already called that row. Code blocks, inline code, the ASCII banner and its divider, and the raw view ignore both slots and stay monospace in every mode, because alignment is load-bearing there and taste is not.
 

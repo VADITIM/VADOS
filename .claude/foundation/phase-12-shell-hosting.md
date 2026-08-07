@@ -6,7 +6,7 @@
 
 ## The premise
 
-VAD/OS is the terminal; the shell is a process it hosts ([../decisions.md](../decisions.md)). Today `pty_spawn` hardcodes PowerShell on Windows and `$SHELL` on Linux. That is a default, and it needs to stop being the only option.
+VAD/OS is the terminal; the shell is a process it hosts ([../decisions.md](../decisions.md)). Today `build_shell_command` hardcodes PowerShell on Windows and `$SHELL` on Linux. That is a default, and it needs to stop being the only option.
 
 PowerShell stays the Windows default — preinstalled, maintained, and what most Windows developers already use. Nothing above the PTY may depend on it.
 

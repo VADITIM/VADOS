@@ -80,6 +80,10 @@ Two consequences to design for rather than discover:
 - **Re-entry during an exit.** A second toast arriving mid-fade must reset the node, not inherit a half-faded state. Kill the tweens and `gsap.set()` back to neutral on the way in.
 - **Reduced motion still leaves.** Duration goes to 0, the code path does not disappear. See the reduced-motion table.
 
+**The panel rises in and leaves upward**, not back down the way it came. It is centred in the window, so it has no edge to belong to and no drawer to retract into — the pair reads as one object passing through, which is the honest description of a panel that is neither docked nor persistent. The travel is 6dvh: at the 2dvh it used to be, a centred panel just appears with a twitch.
+
+The exit also owns the refocus. The panel took focus from the terminal when it opened, and the terminal is the input engine — a close path that does not hand focus back leaves the user typing into nothing.
+
 ## Attention: one focus at a time
 
 Every animation belongs to exactly one of three tiers, and the tier decides its amplitude. This is the mechanism behind "guides the eye" — not a style note.
@@ -100,15 +104,23 @@ This is the whole rule behind the settings panel: the panel is focal and gets th
 |---|---|---|
 | Line reveal (typewriter) | 0.225s | `steps(n)` — see below |
 | Line stagger interval | **0.096s** | — |
+| Label reveal — bar sweep | 0.28s | `power3.inOut` |
+| Label reveal — bar retreat | 0.32s | `power3.inOut` |
+| Label reveal — beat between tiers | 0.2s | — |
+| Character wave — one character | 0.3s | `power2.out` |
+| Character wave — stagger | 0.012s per unit, 0.6s total cap | — |
 | Block entrance | 0.25s | `power2.out` |
 | Result heading pulse | 0.3s | `power2.out` |
 | Divider draw | 0.25s | `power2.inOut` |
 | Border hover | 0.25s | `power2.out` |
-| Settings panel slide | 0.34s | `power3.out` |
+| **Copy — lean toward the cursor** | 0.12s | `power2.in` |
+| **Copy — return** | 0.16s | `power2.out` + discrete settle |
+| Settings panel rise (from 6dvh below) | 0.34s | `power3.out` |
+| Settings panel leave (to 6dvh above) | 0.2s | `power2.in` |
 | Raw/block mode crossfade | 0.2s | `power1.inOut` |
-| **Handoff — retract (anticipation)** | 0.12s | `back.in(2.4)` |
-| **Handoff — pop out** | 0.16s | `back.out(2)` |
-| **Handoff — travel / arrive** | 0.2s | `power3.out` |
+| **Handoff — mark run (anticipation)** | 0.16s | `power2.inOut` |
+| **Handoff — border draw** | 0.34s | `power2.inOut` |
+| **Handoff — box bounce (0.4dvw wider)** | 0.18s | `back.out(2)` |
 | **Settle (element losing focus)** | 0.16s | discrete — see *Two bounces* |
 | Glitch entrance | 0.35s | `rough(...)` — see *The glitch* |
 | Glitch exit | 0.2s | `steps(4)` |
@@ -133,34 +145,58 @@ The default shape for any action that moves content from one region of the UI to
 
 | Beat | What happens | Why it exists |
 |---|---|---|
-| **1. Retract** | The source compresses into itself, to a **fixed width**, past its resting size | Anticipation. This is what makes the pop read as *released* rather than merely appearing |
-| **2. Pop** | The new element emerges **from the source's retracted size**, not from nothing | The size continuity is the whole trick — it is what says *this came from that* |
-| **3. Travel** | The new element arrives in its destination and settles | Puts the eye where the content now is |
+| **1. Run** | The source's leading mark travels to the **end of the content being handed over** | Anticipation, and it states what is being handed over: the throw is as long as the command is |
+| **2. Draw** | The new container's border draws outward from the **top centre**, in both directions, **glowing in the accent with the brightest point at each growing end** | The continuity is positional — the border starts from the point the mark just left, so the container reads as spawned by the ghost line rather than as a box that appeared near it. The bright head is what says the line is *being drawn* rather than being uncovered |
+| **3. Bounce** | The box closes, its content appears, the **box springs a little wider and settles**, and the reveal starts — all at the same instant | Says *arrived*. The content is what the box was drawn for; staging it after the bounce makes the container arrive twice |
 
 The beats overlap by roughly a third. Beat 2 starts before beat 1 has fully settled, beat 3 before beat 2 has. Sequential beats read as three separate events; overlapped, they read as one gesture. On a timeline that is a negative position offset, e.g. `"-=0.05"`, not a shortened duration.
 
 **Meanwhile, the source returns to rest.** It does this on the same timeline, in the peripheral tier, with the discrete settle below. Both halves of the handoff are one timeline object, because both have to die together on interrupt.
 
-### Amplitude is a width, not a scale factor
+### Distances are measured, never assumed
 
-**A constant `scaleX` is wrong and must not be used.** `scaleX: 0.82` on a 600px input retracts it by 108px; on a 1600px input the same number retracts it by 288px. Same code, two different gestures — playful at one width, slapstick at the other. The bug is that a scale factor is relative to a box whose size is not a constant.
-
-**Retract to a fixed distance, expressed in `dv` units, and derive the scale from it.** The gesture then looks identical at every window size, which is the point.
+**Beat 1's throw is the width of the text being handed over**, read off the DOM at submit time — not a constant, and not a proportion of the bar. A one-word command gets a short run and a long pipeline a long one, which is the gesture reporting what was actually submitted. A fixed distance would say the same thing about every command, which is to say nothing.
 
 ```ts
-// The retract pulls the input in by a fixed visual distance, not by a
-// fixed proportion of whatever width it happens to have.
-const RETRACT_DVW = 6;                                    // tune this, not the scale
-const retractPx = (RETRACT_DVW / 100) * window.innerWidth;
-const width = input.getBoundingClientRect().width;
-
-// Floor it: on a narrow window the retract must not eat the whole element.
-const scaleX = Math.max(0.6, (width - retractPx) / width);
+const dx = Math.max(0, text.getBoundingClientRect().right - mark.getBoundingClientRect().right);
 ```
 
-This stays inside the transform-only rule — `width` is read once to compute a target, never tweened. The beat that follows pops from this same computed `scaleX`, so the size continuity that makes the handoff legible is preserved for free.
+Where a distance is *not* derived from content — a travel offset, an entrance's rise — **express it in `dv` units, never in `%` of the moving element or as a constant `scale`.** A percentage of the element is a percentage of a thing whose size you do not control, and `scaleX: 0.82` is a small pull on a narrow window and a slapstick squash on a wide one.
 
-Same reasoning applies to every travel distance and offset in this file: **express it in `dv` units, never in `%` of the moving element.** A percentage of the element is a percentage of a thing whose size you do not control.
+### The border draws with a clip, on its own layer
+
+The frame is a separate absolutely positioned element created by the entrance and removed on completion, never the block's own `border` and never part of the template:
+
+- **A clip on the block would take its content with it.** The frame is the only thing being drawn, so the frame is the only thing clipped.
+- **Svelte re-renders the block's subtree on every chunk** — the same hazard that keeps the reveal bars in their own static host.
+- The draw is `clip-path: inset(0 50% 0 50%)` → `inset(0)`. Opening from the vertical centre line grows the top edge outward from the point the mark stopped at and lands the sides last, which is the order a box gets drawn in.
+- **`power2.inOut`, never `power2.out`** — the same trap the label bar's sweep documents, and it is the one that gets "fixed" back by matching the eases around it. An `out` ease is most of the way across before the eye has found it, so the border reads as having already been there rather than as being drawn. This is a longer beat than the rest of the sequence (0.34s, at the chrome cap) for the same reason: at 0.18s a full-width draw is over before it registers as motion.
+- **The block's own border and background are transparent for the duration** and are restored at the pop. A border already on screen makes the draw a decoration over it; a filled box gives the draw nothing to describe.
+- The frame's corner radius is **one pixel larger** than the block's — its box is 1px outside it on every side, and a concentric corner is not the same radius.
+
+**One number drives the whole thing.** `--gap` is the clip's inset from each side *and* the x of each glowing head, written from a proxy in `onUpdate` rather than tweened as a `clip-path` string — the same reason `reveal.js` writes its staircase by hand. Two values agreeing by tuning is a bright head that drifts off the edge it is meant to be the end of; one value cannot drift.
+
+**The glow is a masked gradient, not a border colour.** A `border` cannot carry a gradient that tracks a moving point, so the frame is the `.block-hue` trick again: a background clipped to a 1px ring by two composited masks. The line already drawn is the accent at 40%; each head is a tall narrow radial at the clip edge, at full accent, over a small `drop-shadow`. Tall, because past the corner the growing end is running down the side and a round glow would come off it.
+
+### The container arrives before its content, and only once
+
+**Everything inside the block is hidden for the duration of the draw** — not just its text. The reveal hides text only, so without this a code block's box, its background and its border are on screen before the border that is supposed to be enclosing them, which is the container arriving second.
+
+It is a class on the block, not a tween on its children: **output keeps arriving during the draw**, and a child that mounts mid-gesture has to be covered by the same rule. `visibility`, so the box still takes its real size and the frame is drawn around the shape the block actually ends up being.
+
+### The bounce is on the frame, and that is what keeps the text still
+
+**The box springs wider on arrival; nothing inside it moves.** The three obvious ways to widen a box all fail that second half, and the failure is the point of the rule:
+
+- `scale` on the block takes its content with it — that is a zoom, not a box growing.
+- Animating the block's `padding` or `margin` pushes the text sideways, and it is a layout property being tweened per frame.
+- Animating `width` is banned outright and would reflow the column.
+
+So the bounce runs on the **frame**, which is an empty overlay: a `scaleX` on it widens the box the user sees and there is nothing inside it to carry. **The block's own border therefore stays transparent until the bounce has landed** — for those frames the frame *is* the border, and handing the edge back mid-stretch would snap it to its resting width.
+
+Amplitude is a fixed `0.4dvw` per side with the scale derived from the block's measured width, under the same rule as every other gesture here: a constant factor is a nudge on a narrow window and a lurch on a wide one.
+
+The class comes off at the bounce, in the same instant the reveal is released — the content appearing, the overshoot, and the typewriter are one beat. Releasing the reveal on the timeline's completion instead puts the typewriter behind the pop, and the block reads as arriving twice.
 
 ### `dv` units are the house unit
 
@@ -200,21 +236,22 @@ Rule of thumb, and it is the only one needed: **elastic pulls the eye, discrete 
 The reference implementation of everything above. Numbers are the starting point, not sacred; the structure is.
 
 ```
-t=0.00  input field    retract  scaleX → computed from 6dvw   0.12s  back.in(2.4)    FOCAL
-t=0.09  new block      pop      from that same computed scaleX → 1
-                                                              0.16s  back.out(2)     FOCAL
-t=0.09  input label    settle   scale 1.06 → 1                0.16s  discrete    PERIPHERAL
-t=0.21  new block      travel   y → resting, autoAlpha → 1    0.2s   power3.out      FOCAL
-t=0.41  block content  typewriter reveal begins
+t=0.00  ghost "> " mark  run    x → end of the command text   0.16s  power2.inOut    FOCAL
+t=0.10  block frame      draw   --gap 50% → 0, heads glowing  0.34s  power2.inOut    FOCAL
+t=0.20  ghost "> " mark  return x → 0                         0.14s  power2.in   PERIPHERAL
+t=0.34  ghost "> " mark  settle                               0.16s  discrete    PERIPHERAL
+t=0.44  block frame      bounce scaleX 1 → 0.4dvw wider → 1   0.18s  back.out(2)     FOCAL
+t=0.44  block content    unhidden, and the reveal begins
+t=0.62  block frame      fade   autoAlpha → 0                 0.12s  power2.in   PERIPHERAL
 ```
 
-Total to first revealed row: **0.41s**, inside the 0.45s sequence budget.
+Total to first revealed row: **0.44s**, inside the 0.45s sequence budget.
 
 Three things this example is actually specifying:
 
-- **The pop starts from the retracted width, not from zero.** It reads the retract's computed end value, so the two stay matched at every window size. Popping from `0` loses the connection and it becomes a generic appear-animation.
-- **The label settles at the same instant the block pops.** Not before, not after. Simultaneous is what makes it read as a handoff rather than as two things that happened.
-- **The reveal does not start until the block has arrived.** Content animating into a container that is itself still moving is unreadable, and it is the most common way this gets built wrong.
+- **The draw starts before the mark has landed**, and the mark returns *under* the draw rather than after it. Sequential beats read as three separate events.
+- **The mark returns to rest while the block is the subject.** It is the source being left behind, so it is peripheral and it ends on the discrete settle — never the elastic, which belongs to the box that just arrived.
+- **The reveal starts at the pop, not after it.** The content is what the box was drawn for. What must not happen is content arriving *during* the draw, which is why everything inside the block is hidden until this instant.
 
 ### Guards
 
@@ -271,6 +308,25 @@ Two places, and no others:
 
 Never on a command block, never on output, and never on a clock. Output that stutters on arrival is indistinguishable from output that is broken, and this is a terminal — the user cannot tell it was a joke and will assume the worst. An effect that fires without the user doing anything is an effect that is burning battery to be noticed.
 
+## Copy — the block leans to the cursor
+
+Right-clicking a block copies its output. The block leans toward the pointer, shrinks slightly, and settles back: the same feel as the portfolio's magnetic buttons, and it works for the same reason — the element the user acted on acknowledges the pointer, instead of a notification appearing somewhere else to report that something happened. The toast stays, but it is no longer the only thing saying the click landed.
+
+```
+lean    x/y toward pointer, scale → 0.97   0.12s  power2.in     FOCAL
+return  x/y → 0                            0.16s  power2.out
+settle  scale 0.988 → 1                    0.16s  discrete, at the same instant
+```
+
+Four things this is specifying, and three of them are rules from elsewhere in this file being applied rather than new ones:
+
+- **The amplitude is a `dv` distance, not a fraction of the block.** A block is anything from two rows to a screenful, so a percentage of the element is a percentage of a thing this code does not control — the same bug the handoff's retract documents. The pointer supplies the *direction* only; a click at the block's edge and one at its centre travel equally far.
+- **The lean eases `in`, the return eases `out`.** The first leg is the content being taken and accelerates away from rest; the second is the block arriving back.
+- **The return is the discrete settle, never elastic.** The block has handed its text over — it is the element *losing* focus, and the spring belongs to the one gaining it. A smooth bounce here reads as "still happening" after the copy is already done.
+- **Clear the transform on completion.** It is spent, and leaving it stales the rect the hover ring is positioned against and keeps a compositor layer alive on a block that is no longer doing anything.
+
+Total 0.28s, inside the output-path budget. Under reduced motion the gesture does not exist — the copy still happens and the toast still fires.
+
 ## The hover ring
 
 Ported from `Module.vue`. This closes the standing blocker; the section below on block chrome describes where it applies.
@@ -321,6 +377,106 @@ Animating `height` is banned everywhere in this file. There is exactly one excep
 - `0.45s`, `power3.out`, `overwrite: "auto"`.
 
 Prefer `scaleY` on a wrapper with `transformOrigin: "top"` wherever the content can tolerate the squash — it is a compositor-only property and needs none of the above. Reach for real height only when the squash is visible, which for text it is.
+
+## Two reveals, and which one an element gets
+
+There are two reveals, and the choice between them is not a style setting — it is a statement about the text.
+
+- **The typewriter** is for text that is **still arriving**. It is a picture of a program writing, and it is only honest while something is actually being written — a streaming command, a block waiting on a response.
+- **The static reveal** is for text that was **finished before it reached the screen**. The banner, `/help`, every line of a command that has already produced it. It is two animations working together: the **label reveal** over the coloured tokens and the **character wave** under the grey prose between them.
+
+Typing out text that was already finished is what made the typewriter look messy. It was animating the wrong thing, not animating wrongly.
+
+**An element is revealed once, by one animation.** When the live element stops being live — the command finished, or more output arrived under it — it is not handed to the static reveal to be revealed a second time in a different style. It has been read; it is shown and dropped. Re-revealing it is most of what "the typewriter looks messy" was.
+
+**The choice is made in the reveal pass, never at mount.** At mount nothing has arrived, so nothing is knowable. The pass asks one question instead — `liveElement`: which element is the last one registered inside a block that has not closed? That one element types; everything above it is complete and gets the static reveal. Elements mount in document order, so "last registered inside the open block" is "furthest down it" without a rect compare.
+
+`REVEAL_MODES` is the reader's switch over all of the above, and it has exactly two positions:
+
+- **`typewriter`** (default) — the rule as written above: the live element types, everything final gets the label reveal and the character wave.
+- **`instant`** — none of it. Every output element arrives as one piece, rising `0.008` of the viewport on `power3.out` over 0.22s: the settings panel's entrance at the scale of a line of text. No character is ever typed, nothing is clipped between chunks, and an element is on screen in full one frame after it mounts (`revealInstant`).
+
+Three things this setting is not:
+
+- **It is not `prefers-reduced-motion`.** That is handled before any reveal is chosen and produces no animation at all. `instant` still animates — it just never *writes*.
+- **It does not touch chrome.** The panel, the suggestion strip, the block border draw and the arrival bounce are responses to a gesture the user just made, and they keep their animation in both modes. The setting governs command output only.
+- **It is not a rate curve.** "Move down" (below) is the same reveal at a different pace; `instant` is a different reveal, and it takes the element out of the row-counting machinery entirely.
+
+An element that is mid-reveal when the mode changes is shown where it stands, never replayed — the same rule the live/final handoff follows above, for the same reason.
+
+### The label reveal
+
+Ported from the portfolio's `miscLabelReveal.ts` (`buildLabelReveal`), beat for beat. An accent bar grows from zero across the label, the text is uncovered underneath it, and the bar then slides off to the right — so the text is revealed by the bar leaving, not by a separate animation racing it.
+
+```
+bar   scaleX 0 → 1     0.28s  power3.inOut   transformOrigin: left center
+text  clipPath set open                      (instant, under the bar)
+bar   transformOrigin: right center
+bar   scaleX 1 → 0     0.32s  power3.inOut
+```
+
+Durations are roughly two-thirds of the portfolio's 0.42s/0.5s, under the same rule that retuned the glitch: a section entrance there is a destination, a line of output here is on the way to something.
+
+Three details carry the whole gesture, and all three are easy to get wrong:
+
+- **`power3.inOut`, never `power3.out`.** An `out` ease is most of the way across before the eye has found it, so the bar never reads as *growing* — it reads as already being there. The `inOut` starts from a standstill. This is the single most likely thing to be "fixed" back by someone matching the eases used elsewhere in this file.
+- **The text is `set` visible, not tweened.** It is behind the bar at that instant, so there is nothing to animate. Tweening a clip alongside the retreat means two eases over one edge, and wherever they part the text either leads the bar or trails it.
+- **The retreat is longer than the sweep.** The asymmetry is what makes the bar read as uncovering the text rather than as a highlight passing over it.
+
+The origin flip between the legs happens at `scaleX: 1`, where it is invisible — a scale of 1 is the identity whichever corner it is anchored to. That flip is what turns the retreat into the bar sliding off rather than collapsing back the way it came.
+
+**The bar is never a child of the element it reveals, and never a child of anything the framework renders into.** Two independent reasons, and either one alone is decisive:
+
+1. Output elements are re-rendered from the parser on every chunk. This is the `SplitText` hazard again — a framework rewriting its children either drops what you put there or keeps it and loses the text node instead.
+2. **A clip applies to the element's own decoration.** The reveal clips the target; a bar inside the target gets uncovered along with the text it was supposed to be uncovering.
+
+So the bars live in one static overlay, built once, positioned over the target in the scroll container's own coordinates. The overlay is inside the scrollport so the bars scroll with the content they are drawn over, and it is absolutely positioned so it adds no height to the flex column.
+
+### What is a label, and in what order
+
+**The parse is the identification.** The parser has already decided what every run of text *is* — a status heading, a filled inline-code token, a path, a flag, a placeholder, a link — and the renderer wrote that decision onto the element as a class. The animation reads it back and spends it. It knows nothing about markdown, and it never re-derives what the parser already knows.
+
+The ranking lives in [../../src/lib/reveal-plan.js](../../src/lib/reveal-plan.js) (`labelTier`, `labelGroups`), pure and checked without a browser: `node src/lib/reveal-plan.check.mjs`.
+
+**Colour decides.** A colour is the parser saying *this run means something specific*, so anything tinted is a label and anything grey is prose for the wave. Tier order is **most saturated first**, because the order the eye receives them in should be the order of how much they matter:
+
+| Tier | What | Colour |
+|---|---|---|
+| 0 | Status headings | `--err` / `--ok`, fully saturated |
+| 1 | Accent headings, filled inline code | `--accent-text`, on an accent surface |
+| 2 | Paths | the complement |
+| 3 | Flags, links, timestamps | `--accent-text` |
+| 4 | Placeholders | `--accent-text-soft` |
+
+Tiers are `0.2s` apart, every label in a tier sweeps at the same instant. `git diff --no-index [<options>] <path>` therefore lands its flags together, then its placeholders a beat later — the structure of the line made visible, rather than a decoration laid over it.
+
+Two rules hold it together:
+
+- **An empty tier is skipped, never held open.** The beats are contiguous, so the number of beats is the number of *kinds of thing* in the line — which is the information the stagger exists to carry. A line with no paths must not sit through a beat of nothing.
+- **Grey is never a label.** `md-heading-3` and `tok-str` are both bright and neither is tinted; both belong to the wave. The default in `labelTier` is `null` for the same reason: a class added anywhere in the renderer must not silently start sweeping a bar over itself.
+
+Past `LABEL_MAX` labels a tier opens without bars. Fifty flags in a `--help` dump is fifty absolutely positioned divs for half a second, and at that density they read as one texture anyway.
+
+### The character wave
+
+The grey prose between the labels rises into place character by character — `autoAlpha` and a 7px `y`, 0.3s `power2.out`, 0.012s apart. **This is the one sanctioned per-character stagger in the app**, and the reasons the ban exists do not apply to it: it never runs on streaming output, it is one tween with many targets rather than one tween per character, and it only runs on elements that are on screen.
+
+**The unit drops from a character to a word past `WAVE_MAX`, and the wave itself never disappears.** A code block is hundreds of characters, and the first version fell straight from per-character to a single fade at the cut-off — which is why code blocks had no wave at all. The gesture survives the coarser unit; only the resolution changes. Nothing is split at all past `WAVE_MAX_WORDS`, which is an escape hatch and not a size anything real reaches.
+
+The stagger is `amount`, not `each`: the wave's total length is capped at 0.6s however many units it turned out to have. At a flat per-unit gap a code block's last unit lands seconds after its first, long past the point where anyone is still watching a wave.
+
+The split is real DOM, so it comes with the obligations any split does, and two of them are specific enough to get wrong:
+
+- **The original text nodes are kept, not their markup.** They are detached and handed back on completion — the same objects, so a reference the framework holds still points at a node that is in the document. This is exactly what `SplitText` gets wrong: restoring from a saved HTML *string* builds new nodes, and every reference the framework had is left pointing at something that will never be on screen again.
+- **Characters are grouped into words.** A character span must be `inline-block` for a transform to apply to it at all, and a run of inline-blocks gives the browser a break opportunity between every one of them — so a split element wraps mid-word and re-wraps when it is restored. The word wrapper carries `white-space: pre`, which puts the break opportunities back where the spaces are. Whitespace itself stays as plain text: no ink, nothing to animate.
+
+Text can be nested — a list's text is in its `<li>`s, not in the `<ul>` the reveal is attached to — so every element holding text of its own is split, and labels are never descended into.
+
+Every path that ends a reveal early (interrupt, `clear`, resize, unmount) has to take the split down. That is what `cleanups` is: one teardown per element, held outside the timeline, because a killed timeline's `onComplete` is owed to nobody.
+
+### One hide, before either reveal knows which it is
+
+Both reveals hide their element in the action, before the browser's first paint — and at that moment neither knows which reveal it will be, because nothing has arrived yet. So the action hides with `visibility`, the one hide both can start from, and the pass a frame later swaps it for the hiding its own animation needs: the clip staircase for the typewriter, the per-character `autoAlpha` and the label clips for the static reveal. Dropping the `visibility` any earlier than that puts the whole element on screen at full strength for a frame, which is the flash both reveals exist to avoid.
 
 ## The typewriter reveal
 
@@ -407,6 +563,11 @@ if (pending.length > 40) {
 Additional guards:
 
 - **Off-screen blocks do not animate.** Falls out of the viewport clamp above: an element with no visible rows has nothing to animate and is shown outright.
+- **Nothing is measured against a moving viewport.** Every decision here is a rect against the scrollport, and all of them are wrong while the view is travelling — an element judged off-screen is shown outright, and the row clamp animates the wrong rows. The pass holds, one frame at a time, until the view has settled.
+
+  **Checking for a scroll tween in flight is not enough, and checking only that misses the common case.** The pass runs from `requestAnimationFrame`; the scroll is started from a `ResizeObserver`, whose callbacks are delivered *after* rAF in the same frame. On the frame a chunk lands, the pass therefore runs before the scroll it should be waiting for exists. So the test is also positional: in "move down" the tail is where the view is headed, so a gap between the tail and the bottom edge means a move is owed whether or not anything is tweening yet. This is why "move down" — the mode whose whole job is moving the view — was the mode whose reveals misfired.
+
+  Held frames are capped. A view that never settles must not be able to turn every animation in the app off silently, and by the time that many frames have passed the backlog is usually past the flood threshold anyway — which reveals instantly and wants no measurement.
 - **Leave no per-row DOM behind.** The staircase creates none, which is half of why it is the mechanism. If a future reveal ever does create wrappers, they come down when the reveal completes — one `<div>` per row over a long scrollback is tens of thousands of elements.
 - **Stop tracking finished elements.** Only the last block can still grow. Anything above it is final, and a map keyed by element otherwise holds one entry per rendered node for the life of the session.
 - **A resize is not new content.** Reflow changes an element's row count without changing what it says. Re-baseline every tracked element on resize, or dragging the window edge replays the reveal over output that has been on screen for minutes. Same shape as the height-tween guard above.
@@ -421,7 +582,7 @@ Each command block is a `<section>` with a slightly lighter background than the 
 - **Result heading:** brief pulse on completion, tinted green or red by exit code. Success and failure use the same motion — only the color differs. Do not make failure animate more aggressively; the color already carries it.
 - **Border hover:** the pointer-tracked ring, above. Ambient tier — it never responds to an action.
 
-The entrance above is what an **arriving** block gets. A block created by the user submitting a command gets the handoff instead, and the handoff's third beat replaces the entrance rather than playing alongside it.
+The entrance above is what an **arriving** block gets. A block created by the user submitting a command gets the handoff instead — its border draws and it pops, and that replaces the entrance rather than playing alongside it.
 
 ## Nodes that are not text
 
@@ -467,7 +628,7 @@ Svelte components must return a cleanup function from `onMount` that kills every
 
 ## Do not
 
-- ❌ Per-character stagger.
+- ❌ Per-character stagger on streaming output. The character wave is the one exception and it is bounded: static text only, on screen only, one tween, capped at `WAVE_MAX`.
 - ❌ Animate `width`/`height`/`top`/`left`.
 - ❌ Animate anything inside the raw xterm.js fallback view. That view is a real terminal — it renders at the speed the program writes, with no interception. Only the crossfade into and out of it is animated.
 - ❌ Set `will-change` globally. Only on elements actually mid-animation.
@@ -481,7 +642,8 @@ Svelte components must return a cleanup function from `onMount` that kills every
 - ❌ Queue a handoff behind one already in flight. Kill and hard-set.
 - ❌ Glitch anything but a panel entrance or a toggle's own label. Never output, never a block, never on a clock.
 - ❌ Ship an infinite CSS animation, or any effect that fires without the user acting. Idle CPU is budgeted at literally zero.
-- ❌ Use a constant `scale` factor for a gesture on an element whose width varies. Fixed `dv` distance, derived scale.
+- ❌ Use a constant `scale` factor for a gesture on an element whose width varies. Measure the distance, or express it in `dv`.
+- ❌ Draw a container's spawn border by clipping the container. Own layer, removed on completion.
 - ❌ Reach for `vw`/`vh`/`%` where `dvw`/`dvh` would do.
 - ❌ Attach a per-block pointer listener. One delegated listener on the scroll container.
 - ❌ Animate `height` without the unobserve/re-observe guard and the resize bail-out.
@@ -489,6 +651,6 @@ Svelte components must return a cleanup function from `onMount` that kills every
 
 ## Open
 
-- **Retract distance is a guess.** `6dvw` is a starting number, not a measured one. Tune it against the real input bar — too shallow and the pop has nothing to release from, too deep and "goofy" tips into slapstick. The `0.6` scale floor for narrow windows is likewise untested.
+- **The mark's run on a wrapped or very long command.** The throw is the width of the command text, which on a command that wraps is the width of the last row rather than of the line. Untested against a real long pipeline; it may want a cap.
 - **Per-character glitch probability.** 10% with a floor of one character per label is the current rule. Whether the floor should instead be proportional (`max(1, round(len * 0.1))`) needs checking against real toggle labels, which are short — at eight characters, 10% and the floor are the same thing.
 - **Does the handoff survive a fast typist?** The kill-and-hard-set rule is correct and untested. Someone submitting three commands in under a second should see three blocks land cleanly, not three interrupted gestures. Verify before this ships, not after.

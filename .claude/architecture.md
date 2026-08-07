@@ -19,7 +19,7 @@ VAD/OS is a **terminal emulator**, not a shell. It hosts whatever shell the user
 
 That split matters because it decides where features can live. Anything that requires the shell's cooperation (OSC 133 boundaries, cwd reporting) needs a per-shell snippet and degrades where the shell has no hook. Anything the terminal can do from the byte stream alone (rendering, folding, export, theming) works on every shell for free. When a feature can be built either way, build it in the terminal.
 
-**PowerShell is the Windows default, not the foundation.** It is what `pty_spawn` picks when nothing is configured, because it ships with Windows and every Windows developer already has it. Nothing in the renderer knows it exists — the one PowerShell-shaped thing in the frontend is the prompt-strip regex, and that is a bug to fix, not a design. See [foundation/phase-12-shell-hosting.md](foundation/phase-12-shell-hosting.md).
+**PowerShell is the Windows default, not the foundation.** It is what `build_shell_command` picks when nothing is configured, because it ships with Windows and every Windows developer already has it. Nothing in the renderer knows it exists — the one PowerShell-shaped thing in the frontend is the prompt-strip regex, and that is a bug to fix, not a design. See [foundation/phase-12-shell-hosting.md](foundation/phase-12-shell-hosting.md).
 
 ## The differentiator, and its constraint
 

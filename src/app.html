@@ -1,13 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" style="background: #0a0a0c">
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Tauri + SvelteKit + Typescript App</title>
+    <!-- The window paints before the bundle does. Without these the first
+         frames are the webview's default white, which reads as the app
+         flashing on. `color-scheme` covers the webview's own base canvas,
+         the inline background covers the gap before the stylesheet lands,
+         and `backgroundColor` in tauri.conf.json covers the frames before
+         the webview exists at all. All three are needed; each covers a
+         different stage of startup. -->
+    <meta name="color-scheme" content="dark" />
+    <title>VAD/OS</title>
     %sveltekit.head%
   </head>
-  <body data-sveltekit-preload-data="hover">
+  <body data-sveltekit-preload-data="hover" style="margin: 0; background: #0a0a0c">
     <div style="display: contents">%sveltekit.body%</div>
   </body>
 </html>

@@ -33,6 +33,9 @@ The plugins installed for this repo are not optional decoration. Use them by def
 - `src-tauri/src/screenshot.rs` — F2 debug capture. Writes `demo/` and rewrites the README gallery. Dev-only: the path comes from `CARGO_MANIFEST_DIR`.
 - `src/lib/parse.js` — output → AST. Self-check: `node src/lib/parse.check.mjs`.
 - `src/lib/reveal.js` — typewriter clip geometry. Self-check: `node src/lib/reveal.check.mjs`.
+- `src/lib/reveal-plan.js` — which reveal a run of parsed text gets, and in what order. Self-check: `node src/lib/reveal-plan.check.mjs`.
+- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
+- `src-tauri/src/dir.rs` — directory listing for the Tab suggestions. Dumb like `pty.rs`: names and is-it-a-directory, nothing more.
 - `src/routes/+page.svelte` — terminal view.
 
 ## Architecture

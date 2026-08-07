@@ -6,15 +6,17 @@ A cross-platform terminal for Windows and Linux that renders command output as s
 
 <!-- demo:start -->
 
-![vados-1786045933.png](demo/vados-1786045933.png)
+![vados-1786106533.png](demo/vados-1786106533.png)
 
-![vados-1786045955.png](demo/vados-1786045955.png)
+![vados-1786106546.png](demo/vados-1786106546.png)
 
-![vados-1786045965.png](demo/vados-1786045965.png)
+![vados-1786106574.png](demo/vados-1786106574.png)
 
-![vados-1786045977.png](demo/vados-1786045977.png)
+![vados-1786106598.png](demo/vados-1786106598.png)
 
-![vados-1786045993.png](demo/vados-1786045993.png)
+![vados-1786106653.png](demo/vados-1786106653.png)
+
+![vados-1786106689.png](demo/vados-1786106689.png)
 <!-- demo:end -->
 
 ## What it does
@@ -22,7 +24,7 @@ A cross-platform terminal for Windows and Linux that renders command output as s
 [ Brackets mean currently not implemented ]
 
 - **Any shell.** PowerShell, bash, and zsh work today. [WSL distributions, Git Bash, `cmd`, fish, Nushell, tcsh, Xonsh, dash, ksh, or any binary you point it at.]
-- **One terminal, both platforms.** Identical functionality and visuals on Windows and Linux. No feature gaps, no "works better on X."
+- [**One terminal, both platforms.** Identical functionality and visuals on Windows and Linux. No feature gaps, no "works better on X."]
 - **Markdown-structured output.** Every command becomes a distinct block instead of a wall of text: the command renders as a `#` heading behind a `---` divider, running output (downloads, progress bars, spinners) sits in a live-updating fenced code block so it can't break the layout, and completion closes it with a `##` heading, green for success, red for failure.
 - **Typewriter reveal.** Output animates in row by row as it arrives, with hard flood control so a `npm install` never falls behind reality.
 - **Dark theme, muted accent colours, thin rounded borders.**

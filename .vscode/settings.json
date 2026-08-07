@@ -7,10 +7,10 @@
     "vite.config.*": true,
     "tsconfig.json": true,
     "svelte.config.*": true,
-    "package.json": true,
+    // "package.json": true,
     "package-lock.json": true,
-    "src-tauri/tauri.conf.json": true,
-    "src-tauri/Cargo.toml": true,
+    // "src-tauri/tauri.conf.json": true,
+    // "src-tauri/Cargo.toml": true,
     "src-tauri/Cargo.lock": true
   }
 }

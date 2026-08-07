@@ -1,5 +1,6 @@
 #![allow(linker_messages)]
 
+mod dir;
 mod pty;
 mod screenshot;
 
@@ -28,44 +29,67 @@ fn scaled(reference: (f64, f64), screen: (f64, f64)) -> LogicalSize<f64> {
     )
 }
 
+/// Scale the window to this monitor. Every failure path leaves it at the
+/// tauri.conf.json values — a window that opens at the reference size beats one
+/// that fails to open.
+fn size_window(window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let screen = (
+        monitor.size().width as f64 / scale,
+        monitor.size().height as f64 / scale,
+    );
+
+    let min = scaled(REF_MIN, screen);
+    let mut start = scaled(REF_START, screen);
+    // A screen small enough that the scaled startup size would fill it is one
+    // where the window should be smaller than the formula says, not one where
+    // it should overhang the desktop.
+    start.width = start.width.min(screen.0 * MAX_SCREEN_SHARE).max(min.width);
+    start.height = start.height.min(screen.1 * MAX_SCREEN_SHARE).max(min.height);
+
+    let _ = window.set_min_size(Some(min));
+    let _ = window.set_size(start);
+    let _ = window.center();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // Falls through to the tauri.conf.json values if the monitor cannot
-            // be queried — a window that opens at the reference size beats one
-            // that fails to open.
-            let Some(window) = app.get_webview_window("main") else {
-                return Ok(());
-            };
-            let Ok(Some(monitor)) = window.current_monitor() else {
-                return Ok(());
-            };
-            let scale = monitor.scale_factor();
-            let screen = (
-                monitor.size().width as f64 / scale,
-                monitor.size().height as f64 / scale,
+            // Before anything touches the window: the shell takes a few hundred
+            // milliseconds to reach its first prompt, and none of that has to
+            // wait for the webview. Started here, it boots alongside it, and the
+            // output is buffered until the frontend attaches. Failure is not
+            // fatal — `pty_attach` starts one itself if this did not.
+            let _ = pty::start(
+                &app.state::<pty::PtyState>(),
+                pty::EARLY_SIZE.0,
+                pty::EARLY_SIZE.1,
+                None,
             );
 
-            let min = scaled(REF_MIN, screen);
-            let mut start = scaled(REF_START, screen);
-            // A screen small enough that the scaled startup size would fill it
-            // is one where the window should be smaller than the formula says,
-            // not one where it should overhang the desktop.
-            start.width = start.width.min(screen.0 * MAX_SCREEN_SHARE).max(min.width);
-            start.height = start.height.min(screen.1 * MAX_SCREEN_SHARE).max(min.height);
-
-            window.set_min_size(Some(min))?;
-            window.set_size(start)?;
-            window.center()?;
+            if let Some(window) = app.get_webview_window("main") {
+                size_window(&window);
+                // The window is created hidden (`visible: false` in
+                // tauri.conf.json) so the sizing above is not a visible jump. It
+                // used to open at the config size, then resize, then re-centre,
+                // all on screen — the window moving three times before the app
+                // had drawn anything, which is a good part of what startup
+                // *felt* like.
+                let _ = window.show();
+            }
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
         .manage(pty::PtyState::default())
         .invoke_handler(tauri::generate_handler![
-            pty::pty_spawn,
+            pty::pty_attach,
             pty::pty_write,
             pty::pty_resize,
+            dir::list_dir,
             screenshot::screenshot
         ])
         .run(tauri::generate_context!())
