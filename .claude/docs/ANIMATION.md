@@ -102,8 +102,7 @@ This is the whole rule behind the settings panel: the panel is focal and gets th
 
 | Thing | Duration | Ease |
 |---|---|---|
-| Line reveal (typewriter) | 0.225s | `steps(n)` — see below |
-| Line stagger interval | **0.096s** | — |
+| Block reveal (typewriter) — one element | **0.12s–0.26s**, `rows × 0.028s` clamped | `none` — the quantized cursor is the step |
 | Label reveal — bar sweep | 0.28s | `power3.inOut` |
 | Label reveal — bar retreat | 0.32s | `power3.inOut` |
 | Label reveal — beat between tiers | 0.2s | — |
@@ -382,14 +381,16 @@ Prefer `scaleY` on a wrapper with `transformOrigin: "top"` wherever the content 
 
 There are two reveals, and the choice between them is not a style setting — it is a statement about the text.
 
-- **The typewriter** is for text that is **still arriving**. It is a picture of a program writing, and it is only honest while something is actually being written — a streaming command, a block waiting on a response.
+- **The typewriter** is for text that is **still arriving**. It is a picture of a program writing, and it is only honest while something is actually being written — a streaming command, a block waiting on a response. It writes with a **caret**, and the caret is the input bar's own.
 - **The static reveal** is for text that was **finished before it reached the screen**. The banner, `/help`, every line of a command that has already produced it. It is two animations working together: the **label reveal** over the coloured tokens and the **character wave** under the grey prose between them.
 
 Typing out text that was already finished is what made the typewriter look messy. It was animating the wrong thing, not animating wrongly.
 
 **An element is revealed once, by one animation.** When the live element stops being live — the command finished, or more output arrived under it — it is not handed to the static reveal to be revealed a second time in a different style. It has been read; it is shown and dropped. Re-revealing it is most of what "the typewriter looks messy" was.
 
-**The choice is made in the reveal pass, never at mount.** At mount nothing has arrived, so nothing is knowable. The pass asks one question instead — `liveElement`: which element is the last one registered inside a block that has not closed? That one element types; everything above it is complete and gets the static reveal. Elements mount in document order, so "last registered inside the open block" is "furthest down it" without a rect compare.
+**The choice is made in the reveal pass, never at mount.** At mount nothing has arrived, so nothing is knowable. The pass asks one question instead — `awaitingBlock`: is the last block still open? **Everything inside it types**; everything in a block whose command has already returned gets the static reveal.
+
+**The question is per block, not per element.** An earlier rule gave the typewriter to the last registered element only, which put two animations inside one block — a line typed itself, and the lines that arrived under it in the same command swept in on bars — with the boundary between them falling wherever a PTY chunk happened to land. One block, one animation, and which one is a fact about the command rather than about chunking.
 
 `REVEAL_MODES` is the reader's switch over all of the above, and it has exactly two positions:
 
@@ -459,6 +460,8 @@ Past `LABEL_MAX` labels a tier opens without bars. Fifty flags in a `--help` dum
 
 ### The character wave
 
+**The wave runs last, after every label tier.** It starts at `tiers.length * LABEL_STEP` — one beat past the last tier's start, which falls inside that tier's own retreat, so the prose begins as the last bar is clearing its text rather than after a gap. The tiers are a ranking of how much a run of text means and grey prose is the bottom of it: it is the material the tokens sit in, so it arrives after them. An element with no labels has no beats to wait through and waves at zero.
+
 The grey prose between the labels rises into place character by character — `autoAlpha` and a 7px `y`, 0.3s `power2.out`, 0.012s apart. **This is the one sanctioned per-character stagger in the app**, and the reasons the ban exists do not apply to it: it never runs on streaming output, it is one tween with many targets rather than one tween per character, and it only runs on elements that are on screen.
 
 **The unit drops from a character to a word past `WAVE_MAX`, and the wave itself never disappears.** A code block is hundreds of characters, and the first version fell straight from per-character to a single fade at the cut-off — which is why code blocks had no wave at all. The gesture survives the coarser unit; only the resolution changes. Nothing is split at all past `WAVE_MAX_WORDS`, which is an escape hatch and not a size anything real reaches.
@@ -484,11 +487,26 @@ This is the signature animation and the one most likely to be implemented wrong.
 
 ### The rule
 
-**Stagger by rendered row, not by character, and not by logical line.**
+**Write by rendered row. Stagger by block.**
 
 A per-character stagger is forbidden. At 0.05s per character, a single 80-column line takes four seconds — output would fall minutes behind a real command. Character-level staggering also means one tween per character, which is thousands of tweens for a normal `git log`.
 
-Instead: **one tween per rendered row, staggered 0.096s apart.** A "rendered row" is a visual line as the browser actually laid it out. This matters because a single logical line that wraps across three rows must produce **three** staggered reveals, not one. The stagger follows what the eye sees, not what the string contains.
+The cursor still walks **rendered rows** — a visual line as the browser actually laid it out, so a logical line that wraps across three rows is wiped three times, not once. The wipe follows what the eye sees, not what the string contains.
+
+**But the row is not the beat.** One element is typed in a single short burst — `rows × 0.028s`, floored at 0.12s and capped at 0.26s — and the pause the eye reads is between one element and the next. A one-line result and an eight-line paragraph are both one beat.
+
+Reading-paced rows (0.096s each) were right when exactly one element typed and everything above it was already final. Now that a whole open block types, a per-row pace puts an eight-line block four times behind the shell that wrote it. A block is a thought; the beat belongs between thoughts.
+
+**One element types at a time, in document order.** The next starts when the one before it lands, so a burst never begins part-way down a block whose earlier lines are still being written. Off-screen elements are exempt from that queue — they have nothing to animate, and holding them behind a burst nobody can see them under is a queue that only grows.
+
+### The caret
+
+**The typewriter writes with the input bar's caret.** Same element, same width, same fill, riding the wipe's leading edge and stepping with it. It is what makes the reveal a picture of *something writing* rather than of text uncovering itself, and it is the last beat of the handoff: the bar hands its cursor to the block, the block writes with it, and it goes out when nothing is being written.
+
+- **The caret and the clip edge come out of one function.** `revealHead` in `src/lib/reveal.js` is `revealClip`'s own quantization, exported. Two copies of the same rounding is a caret that drifts half a cell off the edge it is meant to be standing on.
+- **It lives in the bars overlay**, for both of the reasons the bars do: Svelte rewrites an output element's children on every chunk, and a clip on the element applies to everything inside it — a caret in there would be wiped by the wipe it is supposed to be leading.
+- **It does not blink.** The blink is for a caret sitting still. A moving caret that also blinks reads as two effects.
+- **Its origin is measured once per burst**, not per frame — a rect read every frame is a forced layout every frame of every reveal.
 
 ### How
 
@@ -510,7 +528,9 @@ Live in `src/lib/reveal.js` (`revealClip`, `revealStagger`), driven from `src/ro
 Two of these are lifecycle rules rather than look, and they are the two most likely to be undone by accident:
 
 - **The clip is permanent while the element can still grow.** It is not applied for the duration of a tween and cleared afterwards. Cleared, the next chunk's text is on screen for the frame between the framework writing it and the reveal pass running — text appears at full strength, disappears, then types itself in. For the same reason the *first* hide happens in the mount hook, which runs before the browser's first paint of that node; a frame later is already too late. An element stops being clipped only when it can no longer grow, and that unclip is also the safety net under every row-count assumption here.
-- **Never clip an element that carries chrome.** A code block's box, background and border are already on screen and stay there; only the text inside it types. Clipping the container animates the box in, which is a different and wrong statement about what happened. Where the chrome and the text are the same element — the pinned command line, a fenced block — the text gets its own inner element and the reveal goes on that.
+- **Never clip an element that carries chrome.** A code block's box, background and border are not typed; only the text inside them is. Clipping the container animates the box in, which is a different and wrong statement about what happened. Where the chrome and the text are the same element — the pinned command line, a fenced block — the text gets its own inner element and the reveal goes on that.
+
+  **Not clipped is not the same as not animated.** Left entirely alone, a code block's box arrived at full strength the frame it mounted — ahead of the text above it and ahead of its own contents, with no motion at all. That is what "popping in" is. The box gets the short rise `instant` gives a line of output (0.008dvh, 0.22s, `power3.out`) and the code then types inside it: the container arrives, then its content, which is the order every other container here follows.
 
 Four more properties carry the look, and they are the part that is binding:
 
@@ -519,7 +539,7 @@ Four more properties carry the look, and they are the part that is binding:
 - **The row is the unit.** The cursor is measured in rendered rows, so a wrapped logical line still produces one reveal per visual row.
 - **Nothing in the DOM is touched.** No wrappers, so nothing to revert and nothing to leak — the "revert splits after reveal" guard below stops being a requirement rather than going unmet.
 
-What is genuinely lost is the overlap. The table's numbers are a 0.225s wipe every 0.096s, so consecutive rows are in flight together; one cursor cannot be on two rows at once, so each row's wipe lasts one stagger interval instead. The last row still gets its full 0.225s — the tween's duration is `(rows - 1) * stagger + 0.225`, so a one-row reveal (a heading, a result line, the echoed command) is exactly the tween the table specifies.
+One cursor cannot be on two rows at once, so rows within one element never overlap: each row's wipe is the burst divided by the rows it covers. That is a consequence of the mechanism and not a loss, now that the element rather than the row is the unit being paced.
 
 **Rows are the rows on screen right now.** They are measured from the element's rendered height, so the same text at half the width is twice as many rows and gets twice as many reveals — the stagger still runs from its first row to its last. Do not hand-roll this with `Range.getClientRects()`, and do not derive it from the string: a wrap is a layout fact.
 
@@ -533,9 +553,9 @@ The echoed command line (`> path/to/cwd` + the typed text) is one row, revealed 
 
 ### The scroll mode changes the rate, not the effect
 
-"Move down" (see `SCROLL_MODES`) exists for the reader who does not want to watch output arrive from the top. Playing the normal 0.096s stagger in that mode contradicts the point of it — the view is at the tail specifically to be current, and a reveal paced for reading makes it permanently behind.
+"Move down" (see `SCROLL_MODES`) exists for the reader who does not want to watch output arrive from the top. Playing the normal burst in that mode contradicts the point of it — the view is at the tail specifically to be current, and a reveal paced for reading makes it permanently behind.
 
-**In "move down", the stagger scales with the backlog rather than being a constant.** The deeper the queue of unrevealed rows, the faster each one lands, converging on instant. Concretely: the stagger is the reading-paced 0.096s when there is nothing queued, and falls toward zero as the queue fills, hitting the flood-control threshold below at the same point it would anyway.
+**In "move down", the burst scales with the backlog rather than being a constant.** The deeper the queue of unrevealed rows, the faster the element lands, converging on instant. Concretely: the burst is its full length when there is nothing queued, and falls toward zero as the queue fills, hitting the flood-control threshold below at the same point it would anyway.
 
 This is a rate curve, not a second animation. The wipe, the `steps(n)` ease, and the row-level split are identical in both modes — the reveal must look the same, or the setting becomes a choice between two different products. What changes is only how long each row takes.
 
@@ -547,7 +567,7 @@ Real commands do not emit twenty tidy lines. `npm install` emits thousands, fast
 
 **Rule: only rows inside the viewport are ever animated.** The reveal's span is the intersection of the rows still owed with the rows currently on screen. Rows above the viewport have been scrolled past; rows below its bottom edge are off screen. Both are simply shown — a reveal nobody can watch is cost with no effect, and on a long command it is nearly all of the output. This is also what makes "move down" cheap without a second mechanism: the tail is the only thing on screen, so the tail is the only thing that animates, however many rows the command produced.
 
-**Rule: the animation queue never exceeds ~40 pending rows.** Pending is counted after the viewport clamp above. Past that, reveal instantly (`gsap.set`, no tween, no stagger). At 0.096s per row, forty rows is already ~3.8 seconds of backlog — beyond that the terminal is lying about what has finished.
+**Rule: the animation queue never exceeds ~40 pending rows.** Pending is counted after the viewport clamp above. Past that, reveal instantly (`gsap.set`, no tween, no stagger). Forty rows is more than a screenful and more than one burst can carry — beyond that the terminal is lying about what has finished.
 
 Implement as a single check before animating a batch:
 
@@ -639,6 +659,8 @@ Svelte components must return a cleanup function from `onMount` that kills every
 - ❌ Use the elastic bounce on an element that is losing focus, or the discrete settle on one that is gaining it. The two carry meaning.
 - ❌ Chain a handoff's beats with `delay:`. One timeline, overlapping positions.
 - ❌ Start a content reveal before its container has finished arriving.
+- ❌ Leave a container unanimated because it is chrome. Not clipped, not typed — still arrives.
+- ❌ Give two elements of the same block different reveals. The block decides, not the chunk boundary.
 - ❌ Queue a handoff behind one already in flight. Kill and hard-set.
 - ❌ Glitch anything but a panel entrance or a toggle's own label. Never output, never a block, never on a clock.
 - ❌ Ship an infinite CSS animation, or any effect that fires without the user acting. Idle CPU is budgeted at literally zero.

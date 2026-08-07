@@ -1,7 +1,7 @@
 // Self-check for reveal.js. Plain node, no test framework:
 //   node src/lib/reveal.check.mjs
 import assert from "node:assert/strict";
-import { revealClip, revealStagger } from "./reveal.js";
+import { revealClip, revealHead, revealStagger } from "./reveal.js";
 
 const ROW = 20; // px per rendered row, for readable expectations below
 
@@ -65,6 +65,21 @@ assert.ok(revealClip(2, 13.5, 20).includes("27px"));
 
 // Single-row elements — a heading, a one-line result — are the common case.
 assert.equal(area(revealClip(0.5, ROW, 2), 1), 0.5);
+
+// The typing indicator stands on the clip's leading edge, so the two have to
+// come out of the same quantization — a caret half a cell off the wipe reads as
+// two animations that nearly agree.
+for (const cursor of [0, 0.24, 0.33, 1.5, 2.5, 3.99]) {
+  const head = revealHead(cursor, ROW, 4);
+  const clip = revealClip(cursor, ROW, 4);
+  assert.ok(clip.includes(`${head.x * 100}% ${head.y}px`), `head off the clip at ${cursor}`);
+}
+
+// The head sits at the top of the row being wiped, never below it.
+assert.deepEqual(revealHead(2.5, ROW, 2), { x: 0.5, y: 40 });
+// A negative cursor cannot exist, but the clamp is what keeps the caret on
+// screen if one ever does.
+assert.deepEqual(revealHead(-1, ROW, 4), { x: 0, y: 0 });
 
 // "Stay on top" is the constant reading pace, whatever the backlog.
 assert.equal(revealStagger(1, 0.12, 40, false), 0.12);

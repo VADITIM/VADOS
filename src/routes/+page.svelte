@@ -13,7 +13,7 @@
   import { parse, toMarkdown } from "$lib/parse.js";
   // The reveal's geometry lives in its own module so it can be checked without
   // a browser: `node src/lib/reveal.check.mjs`.
-  import { revealClip, revealStagger } from "$lib/reveal.js";
+  import { revealClip, revealHead, revealStagger } from "$lib/reveal.js";
   // Which reveal a run of parsed text gets, and in what order — read off the
   // classes the parser's own decisions put on it. Checked without a browser:
   // `node src/lib/reveal-plan.check.mjs`.
@@ -1604,9 +1604,10 @@
   //                tokens, the character wave under the grey prose. See
   //                `revealStatic`.
   //
-  // The rule is `liveElement`: text still arriving types itself, text that was
-  // finished before it reached the screen does not. Nothing is decided at mount
-  // — at mount nothing has arrived, so nothing is known.
+  // The rule is `awaitingBlock`: everything inside a block still waiting on its
+  // command types itself, everything in a block that has already returned does
+  // not. Nothing is decided at mount — at mount nothing has arrived, so nothing
+  // is known.
   //
   // ── The typewriter ──────────────────────────────────────────────────────────
   // Output arrives one *rendered row* at a time — a visual line as the browser
@@ -1650,18 +1651,28 @@
   // What is preserved exactly: the row is the unit, the wipe is a `clipPath`
   // and never a slide, and the wipe is stepped rather than smooth.
   //
-  // The one thing genuinely lost is the overlap. ANIMATION.md's numbers are a
-  // 0.225s wipe every 0.096s, so consecutive rows are in flight together; a
-  // single cursor cannot be on two rows at once, so each row's wipe here lasts
-  // one stagger interval instead. The last row still gets its full 0.225s: the
-  // duration is `(pending - 1) * stagger + REVEAL_ROW`, so a one-row reveal —
-  // a heading, a result line, the echoed command — is exactly the tween the
-  // table specifies.
+  // ── The unit is the block, not the row ──────────────────────────────────────
+  // The cursor still walks rows — that is the mechanism, and a wrapped logical
+  // line still produces one wipe per visual row. What changed is the *pacing*:
+  // the whole element is typed in one short burst, and the stagger the eye reads
+  // is between one element and the next rather than between two rows of the same
+  // one.
+  //
+  // Reading-paced rows (0.096s each) were right when exactly one element typed
+  // and everything above it was already final. Everything inside a block that is
+  // still awaiting a response now types, so a per-row pace would put a block of
+  // eight lines four times behind the shell that wrote it. A block is a thought;
+  // the beat belongs between thoughts.
+  //
+  // One element types at a time, in document order, and the next starts when the
+  // one before it lands — so an element never begins mid-way down a block whose
+  // earlier lines are still being written.
 
-  /** Row cadence — how long the cursor takes to move from one row to the next. */
-  const REVEAL_STAGGER = 0.096;
-  /** The wipe across a single row, per ANIMATION.md's table. */
-  const REVEAL_ROW = 0.225;
+  /** Per row while a block types. Fast — the row is no longer the beat. */
+  const TYPE_ROW = 0.028;
+  /** Floor and ceiling on one block's burst, whatever its row count. */
+  const TYPE_MIN = 0.12;
+  const TYPE_MAX = 0.26;
   /** Past this many rows pending, reveal instantly — see flood control below. */
   const FLOOD_ROWS = 40;
   /**
@@ -1784,6 +1795,52 @@
    */
   function show(node: HTMLElement) {
     node.style.visibility = "";
+  }
+
+  /**
+   * The typing indicator — the input bar's caret, riding the wipe's leading
+   * edge.
+   *
+   * The typewriter is a picture of a program writing, and until now the only
+   * evidence of the writer was the text arriving. The caret is the same object
+   * the user was just typing into: the bar hands its cursor to the block, the
+   * block writes with it, and it goes out when the block is done.
+   *
+   * It lives in the bars overlay for the same two reasons the bars do — Svelte
+   * rewrites an output element's children on every chunk, and a clip on the
+   * element applies to anything inside it, so a caret in there would be wiped
+   * by the very wipe it is supposed to be leading.
+   */
+  let typeCaret: HTMLElement | undefined;
+
+  /**
+   * An element's top-left corner in the scroll container's own coordinates —
+   * what the caret's per-frame position is offset from. The overlay is inside
+   * the scrollport, so a caret placed in these coordinates scrolls with the text
+   * it is writing rather than sliding off it when the view moves mid-burst.
+   */
+  function caretOrigin(node: HTMLElement) {
+    if (!scrollEl) return null;
+    const s = scrollEl.getBoundingClientRect();
+    const r = node.getBoundingClientRect();
+    return { x: r.left - s.left + scrollEl.scrollLeft, y: r.top - s.top + scrollEl.scrollTop };
+  }
+
+  /** Put the caret at a point in the scroll container's own coordinates. */
+  function caretTo(x: number, y: number, h: number) {
+    if (!barsEl) return;
+    if (!typeCaret) {
+      typeCaret = document.createElement("div");
+      typeCaret.className = "type-caret";
+      barsEl.append(typeCaret);
+    }
+    typeCaret.style.height = `${h}px`;
+    gsap.set(typeCaret, { x, y, autoAlpha: 1 });
+  }
+
+  /** Nothing is being written. The caret is not idling anywhere — it is gone. */
+  function caretOff() {
+    if (typeCaret) gsap.set(typeCaret, { autoAlpha: 0 });
   }
 
   /** Whole element hidden, opening left to right. The bar wipe's resting state. */
@@ -2080,6 +2137,32 @@
   }
 
   /**
+   * A code block's box.
+   *
+   * The reveal only ever types the text *inside* a code block — its box, border
+   * and background are chrome, and clipping them would animate the box in rather
+   * than the code. But leaving them alone entirely meant the box appeared at
+   * full strength the frame it mounted, ahead of everything around it and ahead
+   * of its own contents: the container arriving after the text above it had been
+   * written, with no motion of its own, which is what reads as popping in.
+   *
+   * So the box gets the one gesture that is not a reveal — the same short rise
+   * `instant` gives a line of output — and the text then types inside it. The
+   * container arrives, then its content, which is the order ANIMATION.md asks
+   * for everywhere else.
+   */
+  function boxIn(node: HTMLElement) {
+    if (reduceMotion) return;
+    gsap.from(node, {
+      autoAlpha: 0,
+      y: INSTANT_RISE * window.innerHeight,
+      duration: INSTANT_TIME,
+      ease: "power3.out",
+      clearProps: "opacity,transform,visibility",
+    });
+  }
+
+  /**
    * The static reveal: labels sweep in by tier, the prose between them rises
    * character by character.
    *
@@ -2137,6 +2220,14 @@
 
     const tl = gsap.timeline({ onComplete: done });
 
+    // The prose waits for every label. The tiers are a ranking of how much a run
+    // of text means, and grey prose is the bottom of it — it is the material the
+    // tokens sit in, so it arrives after them rather than alongside the first
+    // tier. One beat past the last tier's start, which is inside that tier's own
+    // retreat: the wave begins as the last bar is clearing its text, not after a
+    // gap.
+    const waveAt = tiers.length * LABEL_STEP;
+
     if (split) {
       tl.to(
         split.chars,
@@ -2151,12 +2242,16 @@
           // — long past the point where anyone is still watching a wave.
           stagger: { amount: Math.min(split.chars.length * WAVE_STAGGER, WAVE_SPAN) },
         },
-        0,
+        waveAt,
       );
     } else if (!clipped.includes(node)) {
       // Too long to split, and not a label: it rises as one piece. The gesture
       // is the same, the resolution is coarser.
-      tl.from(node, { autoAlpha: 0, y: WAVE_RISE, duration: WAVE_CHAR, ease: "power2.out" }, 0);
+      tl.from(
+        node,
+        { autoAlpha: 0, y: WAVE_RISE, duration: WAVE_CHAR, ease: "power2.out" },
+        waveAt,
+      );
     }
 
     function bar(el: HTMLElement) {
@@ -2219,6 +2314,9 @@
    */
   function dropBars() {
     barsEl?.replaceChildren();
+    // The caret is in there too, so it went with them. Forgetting the reference
+    // would leave every later reveal writing to a detached node.
+    typeCaret = undefined;
   }
 
   /** Ctrl+C, `clear`, unmount. Every in-flight reveal lands and is dropped. */
@@ -2300,25 +2398,23 @@
   }
 
   /**
-   * The one element that can still change: the last one registered inside a
-   * block that has not closed yet.
+   * The block that is still awaiting a response, if there is one.
    *
    * This is what decides which reveal an element gets, and deciding it *here*
    * rather than at mount is the point — at mount nothing has arrived yet, so
    * nothing is known. The typewriter is a picture of a program writing, and it
-   * is only honest while something is being written; everything above the live
-   * element is complete and gets the static reveal instead. Typing out text
-   * that was finished before it reached the screen is what made the typewriter
-   * look messy: it was animating the wrong thing, not animating wrongly.
+   * is only honest while something is being written, so **everything inside the
+   * open block types** and everything outside it — a block whose command has
+   * already returned — gets the static reveal.
    *
-   * Elements mount in document order, so the last one registered inside the
-   * open block is the furthest down it — no rect compare needed.
+   * The narrower rule this replaces gave the typewriter to the last registered
+   * element only, which meant a line typed itself and then the lines that
+   * arrived under it in the same command swept in on bars instead: two
+   * animations inside one block, deciding between themselves on the accident of
+   * which chunk boundary fell where. One block, one animation.
    */
-  function liveElement(last: Element | null | undefined) {
-    if (!last || !last.classList.contains("open")) return undefined;
-    let live: HTMLElement | undefined;
-    for (const node of revealed.keys()) if (last.contains(node)) live = node;
-    return live;
+  function awaitingBlock(last: Element | null | undefined) {
+    return last?.classList.contains("open") ? last : null;
   }
 
   function runReveals() {
@@ -2344,8 +2440,19 @@
     // final and can stop being tracked — otherwise this map is one entry per
     // rendered node for the life of the session.
     const last = scrollEl?.querySelector("section:last-of-type");
-    const live = liveElement(last);
+    const open = awaitingBlock(last);
+    // One element types at a time. The stagger the eye reads is between one
+    // block and the next, so a second burst starting under the first would be
+    // the two beats collapsing back into one.
+    let typing = false;
     for (const node of [...revealed.keys()]) {
+      if (revealing.has(node)) {
+        // A static reveal drops its entry from `revealed`, so an element in both
+        // maps is a typewriter still running — which is the thing being waited
+        // on, and the only thing that has a caret.
+        typing = true;
+        continue;
+      }
       if (revealing.has(node)) continue;
       // `instant` takes the element out of the reveal system entirely: one rise
       // and it is done, including the live one. An element that already has
@@ -2363,12 +2470,15 @@
         revealInstant(node);
         continue;
       }
-      if (node !== live) {
-        // Already typed, and now no longer the live element — the command
-        // finished, or more output arrived under it. It has been read once;
-        // revealing it a second time in a different animation is the "messy"
-        // this whole split exists to remove. Show it and let it go.
+      if (!open || !open.contains(node)) {
+        // The command has returned, so this element can never grow again — and
+        // therefore must never be clipped again either. This is also the only
+        // place a partially revealed element gets shown in full, which is the
+        // safety net under every row-count assumption in this region.
         if ((revealed.get(node) ?? 0) > 0) {
+          // Already typed. It has been read once; revealing it a second time in
+          // a different animation is the "messy" this whole split exists to
+          // remove. Show it and let it go.
           unclip(node);
           show(node);
           revealed.delete(node);
@@ -2377,18 +2487,15 @@
         revealStatic(node);
         continue;
       }
-      if (last && !last.contains(node)) {
-        // Final content: it can never grow again, so it must never be clipped
-        // again either. This is also the only place a partially revealed
-        // element gets shown in full, which is the safety net under every
-        // row-count assumption in this region.
-        unclip(node);
-        show(node);
-        revealed.delete(node);
-        continue;
-      }
+      // Inside the block still awaiting a response: it types. Off-screen
+      // elements are let through even while something else is typing — they
+      // have nothing to animate, and holding them behind a burst nobody can see
+      // them under is a queue that only ever grows.
+      if (typing && inView(node)) continue;
       revealElement(node);
+      if (revealing.has(node)) typing = true;
     }
+    if (!typing) caretOff();
   }
 
   function revealElement(node: HTMLElement) {
@@ -2412,8 +2519,9 @@
     const target = Math.min(rows, win.to);
     const pending = target - start;
     // Flood control, and the same treatment for a block nobody is looking at.
-    // At 0.096s a row, forty rows is already ~3.8s of backlog — past that the
-    // terminal is lying about what has finished. `npm install` emits thousands.
+    // Forty rows is more than a screenful and more than one burst can carry —
+    // past that the terminal is lying about what has finished. `npm install`
+    // emits thousands.
     if (pending <= 0 || pending > FLOOD_ROWS) {
       revealed.set(node, rows);
       // Parked at the full row count, which shows everything — but still
@@ -2422,13 +2530,17 @@
       show(node);
       return;
     }
+    // One burst for the whole element, floored and capped: a one-line result and
+    // an eight-line block are both a single beat, which is what makes the block
+    // the unit rather than the row.
+    const burst = gsap.utils.clamp(TYPE_MIN, TYPE_MAX, pending * TYPE_ROW);
     // "Move down" exists for the reader who wants to be current, so playing the
-    // reading-paced cadence there contradicts the point of the mode. The
-    // stagger scales with the backlog instead, converging on instant and
-    // hitting the flood threshold at the same place it would anyway. The wipe
-    // and the stepping are identical in both modes — only the rate changes, or
-    // the setting becomes a choice between two different products.
-    const stagger = revealStagger(pending, REVEAL_STAGGER, FLOOD_ROWS, scrollMode === "bottom");
+    // reading pace there contradicts the point of the mode. The burst shortens
+    // with the backlog instead, converging on instant and hitting the flood
+    // threshold at the same place it would anyway. The wipe and the stepping are
+    // identical in both modes — only the rate changes, or the setting becomes a
+    // choice between two different products.
+    const duration = revealStagger(pending, burst, FLOOD_ROWS, scrollMode === "bottom");
 
     // One tween walks a row cursor from `done` to `rows` and the clip is
     // written from it: everything above the cursor at full width, the cursor's
@@ -2441,12 +2553,22 @@
     // changed the wrap changed the row band with it.
     rest(node, start, m);
     show(node);
+    // The caret's origin, measured once. The element can grow under it, but only
+    // downward and only into rows this burst is not writing — a re-measure per
+    // frame would be a forced layout on every frame of every reveal.
+    // ponytail: origin taken at the start; a mid-burst reflow would drag the
+    // caret off the text. Re-measure per row if wrapping mid-command shows up.
+    const origin = caretOrigin(node);
     const tween = gsap.to(at, {
       row: target,
-      duration: (pending - 1) * stagger + REVEAL_ROW,
+      duration,
       ease: "none",
       onUpdate() {
         node.style.clipPath = revealClip(at.row, m.row, m.cells);
+        if (origin) {
+          const head = revealHead(at.row, m.row, m.cells);
+          caretTo(origin.x + head.x * node.clientWidth, origin.y + head.y, m.row);
+        }
       },
       onComplete() {
         revealing.delete(node);
@@ -3296,8 +3418,12 @@
                      already on screen — only the text inside is animated. Both
                      reveals depend on this equally. Clipping the container
                      would animate the box in, and the bar wipe would paint over
-                     a box that was never hidden. -->
-                <pre class="code-block"><code class="code-text" use:reveal>{#each node.spans as span}{#if span.token}<span class="tok-{span.token}">{span.text}</span>{:else}{span.text}{/if}{/each}</code></pre>
+                     a box that was never hidden.
+
+                     The box still animates — `boxIn` rises it into place before
+                     the code types inside it. Unanimated, it was the one thing
+                     in a block that simply appeared. -->
+                <pre class="code-block" use:boxIn><code class="code-text" use:reveal>{#each node.spans as span}{#if span.token}<span class="tok-{span.token}">{span.text}</span>{:else}{span.text}{/if}{/each}</code></pre>
                 <!-- Trailing spacer, not margin on .code-block itself — a
                      margin would also apply above the block, doubling up
                      against the block-entrance gap already set by .scroll's
@@ -3755,6 +3881,21 @@
 
   :global(.reveal-bar.warn) {
     background: var(--err);
+  }
+
+  /* The typing indicator, riding the wipe's leading edge. Deliberately the same
+     object as the input bar's caret — same width, same fill — because that is
+     the statement: the bar handed its cursor to the block and the block is
+     writing with it. It never blinks: it is moving, and a blink on a moving
+     caret reads as two effects, not one. `:global` for the same reason as the
+     bar — built in JS, so it never carries Svelte's scoping class. */
+  :global(.type-caret) {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0.65ch;
+    background: var(--accent);
+    will-change: transform;
   }
 
   /* Overlay track. `pointer-events: none` so the whole right edge of the output

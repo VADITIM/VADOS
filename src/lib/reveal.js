@@ -35,14 +35,33 @@
  * @returns {string} A `polygon(...)` value for `clip-path`.
  */
 export function revealClip(cursor, row, cells) {
+  const { x: frac, y: top } = revealHead(cursor, row, cells);
   const line = Math.max(0, Math.floor(cursor));
-  const x = (Math.floor(Math.max(0, cursor - line) * cells) / cells) * 100;
-  const top = line * row;
+  const x = frac * 100;
   const bottom = (line + 1) * row;
   // Every coordinate carries its unit, including the zeroes. A bare `0` is
   // legal CSS and unreadable to anything parsing this back — including the
   // self-check, which is the only thing that ever proves the shape is right.
   return `polygon(0% 0px, 100% 0px, 100% ${top}px, ${x}% ${top}px, ${x}% ${bottom}px, 0% ${bottom}px)`;
+}
+
+/**
+ * Where the wipe's leading edge is at `cursor` — the point the typing
+ * indicator sits on.
+ *
+ * Shared with `revealClip` rather than re-derived beside it: the caret and the
+ * clip edge agreeing by two copies of the same quantization is a caret that
+ * drifts off the character cell it is meant to be standing on.
+ *
+ * @param {number} cursor  Row cursor, as `revealClip` takes it.
+ * @param {number} row     Height of one rendered row, in px.
+ * @param {number} cells   Character cells across the element.
+ * @returns {{ x: number, y: number }} `x` as a fraction of the element's width,
+ *   `y` as the top of the cursor's row, in px.
+ */
+export function revealHead(cursor, row, cells) {
+  const line = Math.max(0, Math.floor(cursor));
+  return { x: Math.floor(Math.max(0, cursor - line) * cells) / cells, y: line * row };
 }
 
 /**
