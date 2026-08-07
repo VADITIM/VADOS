@@ -25,7 +25,8 @@ All commands:
 `;
 
 assert.deepEqual(parse(npm), [
-  { kind: "text", parts: [{ code: false, text: "npm <command>" }] },
+  // The whole command, not the `<command>` out of the middle of it.
+  { kind: "text", parts: [{ code: true, text: "npm <command>" }] },
   { kind: "heading", level: 2, text: "Usage", tone: null },
   {
     kind: "list",
@@ -103,14 +104,154 @@ assert.deepEqual(parse("Build succeeded:\nall targets up to date"), [
 ]);
 
 // Inline code: individual flags/paths/fn() tokens inside a prose line get
-// wrapped, the surrounding words don't.
+// wrapped, the surrounding words don't — and a known command takes its whole
+// argument run with it rather than leaving the flag backticked on its own in
+// the middle of a command nobody marked up.
 assert.deepEqual(parse("run npm install --save-dev then check package.json"), [
   {
     kind: "text",
     parts: [
-      { code: false, text: "run npm install " },
-      { code: true, text: "--save-dev" },
+      { code: false, text: "run " },
+      { code: true, text: "npm install --save-dev" },
       { code: false, text: " then check package.json" },
+    ],
+  },
+]);
+
+// The case this rule exists for: `git diff`'s own usage line. The command, its
+// subcommand, its flag and its placeholders are one thing a reader recognises,
+// and backticking `--no-index` out of the middle of it splits one idea in
+// three. The `usage:` label carries no tone, so it stays bold prose.
+assert.deepEqual(
+  parse("usage: git diff --no-index [<options>] <path> <path> [<pathspec>...]"),
+  [
+    {
+      kind: "text",
+      bold: true,
+      parts: [
+        { code: false, text: "usage: " },
+        { code: true, text: "git diff --no-index [<options>] <path> <path> [<pathspec>...]" },
+      ],
+    },
+  ],
+);
+
+// A command with nothing after it is still a command.
+assert.deepEqual(parse("try cmd instead"), [
+  {
+    kind: "text",
+    parts: [
+      { code: false, text: "try " },
+      { code: true, text: "cmd" },
+      { code: false, text: " instead" },
+    ],
+  },
+]);
+
+// ...but a tool's name at the start of a sentence is a sentence. The bare
+// subcommand slot is the only place prose can leak into a command run, and it
+// is the one thing about this rule that can be embarrassingly wrong.
+assert.deepEqual(parse("git is not installed on this machine"), [
+  {
+    kind: "text",
+    parts: [
+      { code: true, text: "git" },
+      { code: false, text: " is not installed on this machine" },
+    ],
+  },
+]);
+
+// A command name inside a longer word is not a command. `gitignore` and
+// `npmrc` show up constantly in real output.
+assert.deepEqual(parse("edit gitignore"), [
+  { kind: "text", parts: [{ code: false, text: "edit gitignore" }] },
+]);
+
+// A path argument comes along; the path rule does not get to claim it first.
+assert.deepEqual(parse("ran git add src/lib ok"), [
+  {
+    kind: "text",
+    parts: [
+      { code: false, text: "ran " },
+      { code: true, text: "git add src/lib" },
+      { code: false, text: " ok" },
+    ],
+  },
+]);
+
+// Line breaks bound a command run. `\s` would have let one swallow the start
+// of the next line, filing text under the wrong node.
+// (`commit` is a subcommand verb, and on the same line it would have been
+// taken — the newline is the only thing stopping it.)
+assert.deepEqual(parse("run git\ncommit the change"), [
+  {
+    kind: "text",
+    parts: [
+      { code: false, text: "run " },
+      { code: true, text: "git" },
+      { code: false, text: "\ncommit the change" },
+    ],
+  },
+]);
+
+// A URL is one token, scheme included. The path rule would otherwise start it
+// at the `//`, and a trailing full stop belongs to the sentence, not the link.
+assert.deepEqual(parse("see https://svelte.dev/e/a11y_no_static for why."), [
+  {
+    kind: "text",
+    parts: [
+      { code: false, text: "see " },
+      { code: true, text: "https://svelte.dev/e/a11y_no_static", kind: "link" },
+      { code: false, text: " for why." },
+    ],
+  },
+]);
+
+// A URL with a port and a path keeps both, and a `+` in a filename does not
+// end the path it belongs to.
+assert.deepEqual(parse("hmr update /src/routes/+page.svelte"), [
+  {
+    kind: "text",
+    parts: [
+      { code: false, text: "hmr update " },
+      { code: true, text: "/src/routes/+page.svelte", kind: "path" },
+    ],
+  },
+]);
+assert.deepEqual(parse("Local: http://localhost:1420/ ready"), [
+  {
+    kind: "text",
+    bold: true,
+    parts: [
+      { code: false, text: "Local: " },
+      { code: true, text: "http://localhost:1420/", kind: "link" },
+      { code: false, text: " ready" },
+    ],
+  },
+]);
+
+// A timestamp is its own kind, and a port number inside a URL is not one.
+assert.deepEqual(parse("22:55:33 hmr update done"), [
+  {
+    kind: "text",
+    parts: [
+      { code: true, text: "22:55:33", kind: "time" },
+      { code: false, text: " hmr update done" },
+    ],
+  },
+]);
+
+// The end-of-options marker is a token; a hyphen inside a word is not a flag,
+// and a slash inside a word is not a path.
+assert.deepEqual(parse("run cargo -- on VAD/OS with a right-click"), [
+  {
+    kind: "text",
+    parts: [
+      { code: false, text: "run " },
+      // The end-of-options marker is an argument like any other, so the
+      // command takes it rather than leaving it stranded on its own.
+      { code: true, text: "cargo --" },
+      { code: false, text: " on VAD/OS with a right-click" },
     ],
   },
 ]);
@@ -120,7 +261,7 @@ assert.deepEqual(parse("run npm install --save-dev then check package.json"), [
 assert.equal(
   toMarkdown(parse(npm)),
   [
-    "npm <command>",
+    "`npm <command>`",
     "## Usage",
     "- npm install        install all the dependencies in your project\n- npm install <foo>  add the <foo> dependency to your project",
     "## All commands",
@@ -165,15 +306,13 @@ assert.deepEqual(parse("fsd : Die Benennung\nwurde nicht erkannt\n+ fsd\n+ ~~~")
 ]);
 
 // A y/n prompt (no colon) becomes bold prose so it stands out, same as a label.
+// The `/N` is left alone: a slash directly after a word character is part of
+// that word, not a path — the same boundary that keeps `VAD/OS` whole.
 assert.deepEqual(parse("Overwrite file? (y/N)"), [
   {
     kind: "text",
     bold: true,
-    parts: [
-      { code: false, text: "Overwrite file? (y" },
-      { code: true, text: "/N" },
-      { code: false, text: ")" },
-    ],
+    parts: [{ code: false, text: "Overwrite file? (y/N)" }],
   },
 ]);
 assert.deepEqual(parse("Continue? [Y/n]:"), [
@@ -181,9 +320,7 @@ assert.deepEqual(parse("Continue? [Y/n]:"), [
     kind: "text",
     bold: true,
     parts: [
-      { code: false, text: "Continue? [Y" },
-      { code: true, text: "/n" },
-      { code: false, text: "]:" },
+      { code: false, text: "Continue? [Y/n]:" },
     ],
   },
 ]);

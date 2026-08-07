@@ -31,9 +31,12 @@ Register plugins once, at module scope, never inside a component that re-renders
 
 ```ts
 import gsap from "gsap";
-import { SplitText } from "gsap/SplitText";
-gsap.registerPlugin(SplitText);
+import { ScrollToPlugin } from "gsap/ScrollToPlugin";
+import { RoughEase } from "gsap/EasePack";
+gsap.registerPlugin(ScrollToPlugin, RoughEase);
 ```
+
+`rough` is an ease, not a tween property, so an unregistered `RoughEase` does not throw — GSAP falls back to the template ease and the jitter silently disappears. Register it like any plugin.
 
 CSS `@keyframes` is allowed for exactly one thing: the blinking input caret. It is decorative, never interrupted, and never coordinated with anything else — GSAP would be overhead.
 
@@ -95,8 +98,8 @@ This is the whole rule behind the settings panel: the panel is focal and gets th
 
 | Thing | Duration | Ease |
 |---|---|---|
-| Line reveal (typewriter) | 0.18s | `steps(n)` — see below |
-| Line stagger interval | **0.12s** | — |
+| Line reveal (typewriter) | 0.225s | `steps(n)` — see below |
+| Line stagger interval | **0.096s** | — |
 | Block entrance | 0.25s | `power2.out` |
 | Result heading pulse | 0.3s | `power2.out` |
 | Divider draw | 0.25s | `power2.inOut` |
@@ -252,8 +255,9 @@ This is strictly better than putting it on a panel entrance. It is the same look
 
 - **Fires on state change only.** Toggle flipped → its label glitches once. No hover, no open, no timer, no loop.
 - **Roll per character, ~10% chance, once.** With a floor of one affected character per label, or a short label silently does nothing.
-- One flicker is three stepped keyframes over 0.18s — RGB split via `text-shadow` plus a 1–2px `translateX`, `ease: "steps(1)"`. Same shape as the portfolio's `@keyframes sc-word-glitch`, fired once instead of looped.
-- **Tear down the wrapper spans on completion.** Same rule as reverting `SplitText`: the effect is over, the DOM cost is not.
+- One flicker is three stepped keyframes over 0.18s — a 1–2px `translateX` on `ease: "steps(1)"`, against an RGB split via `text-shadow`. Same shape as the portfolio's `@keyframes sc-word-glitch`, fired once instead of looped. **The split is a class held for the duration, not a tweened value:** `text-shadow` interpolates as a string, and a stepped ease over a value GSAP cannot interpolate is a snap dressed up as an animation. The motion is the stepped `x`; the split is what it steps through.
+- **Only ever on static text.** The effect rebuilds the element's children, which detaches any text node a framework is holding a reference to. Toggle labels come from frozen tables and are written once; command output is rewritten on every chunk. This is the same hazard that rules `SplitText` out of the reveal, and the reason the reveal touches no DOM at all.
+- **Tear down the wrapper spans on completion.** The effect is over; the DOM cost is not.
 - The label is focal for those 0.18s. Nothing else in the panel moves with it.
 
 ### Where the glitch is allowed
@@ -328,36 +332,42 @@ This is the signature animation and the one most likely to be implemented wrong.
 
 A per-character stagger is forbidden. At 0.05s per character, a single 80-column line takes four seconds — output would fall minutes behind a real command. Character-level staggering also means one tween per character, which is thousands of tweens for a normal `git log`.
 
-Instead: **one tween per rendered row, staggered 0.12s apart.** A "rendered row" is a visual line as the browser actually laid it out. This matters because a single logical line that wraps across three rows must produce **three** staggered reveals, not one. The stagger follows what the eye sees, not what the string contains.
+Instead: **one tween per rendered row, staggered 0.096s apart.** A "rendered row" is a visual line as the browser actually laid it out. This matters because a single logical line that wraps across three rows must produce **three** staggered reveals, not one. The stagger follows what the eye sees, not what the string contains.
 
 ### How
 
-`SplitText` with `type: "lines"` splits on rendered rows, wraps included. Do not hand-roll this with `Range.getClientRects()` — the plugin already handles font loading, resize re-splits, and nested inline elements.
+**A `clip-path` staircase on the output element itself. Never `SplitText`.**
+
+This rule replaces the original one, which specified `SplitText` with `type: "lines"`. That does not survive contact with this app, and the reason is not a matter of taste:
+
+> **SplitText and streaming output are incompatible here.** SplitText works by replacing an element's `innerHTML` with one wrapper per row; `revert()` restores a saved HTML *string*. Both detach every text node Svelte is holding a reference to. Output elements are re-rendered from the parser on every PTY chunk, so the first reveal of a still-streaming element is the last update that element ever receives — the block freezes at whatever text it held when the split ran, while the shell goes on producing output nobody can see. It is a lifecycle conflict, and it appears only on streaming content, which is all of this app's content.
+
+The staircase: rows above the cursor fully visible, the cursor's own row wiped to a character boundary, rows below it clipped away. One tween walks the cursor; the clip is written from it in `onUpdate`.
 
 ```ts
-SplitText.create(el, {
-  type: "lines",
-  linesClass: "line",
-  autoSplit: true,        // re-split when fonts load or width changes
-  reduceWhiteSpace: false, // preserve alignment in ASCII / <pre> content
-  onSplit(self) {
-    // Return the animation so SplitText can revert and re-sync it on re-split.
-    return gsap.from(self.lines, {
-      clipPath: "inset(0 100% 0 0)",
-      stagger: 0.12,
-      duration: 0.18,
-      ease: (i: number) => `steps(${self.lines[i].textContent?.length || 1})`,
-    });
-  },
-});
+// row = Math.floor(cursor); x = the wipe across it, snapped to a character cell
+`polygon(0 0, 100% 0, 100% ${top}%, ${x}% ${top}%, ${x}% ${bottom}%, 0 ${bottom}%)`
 ```
 
-Two details carry the whole effect:
+Live in `src/lib/reveal.js` (`revealClip`, `revealStagger`), driven from `src/routes/+page.svelte`. Both are pure and checked without a browser: `node src/lib/reveal.check.mjs`.
 
-- **`clipPath` wipe, not a slide.** `inset(0 100% 0 0)` → `inset(0 0 0 0)` reveals the row left-to-right while the text stays put. A `mask: "lines"` + `xPercent` slide looks wrong here — text should appear where it lands, like it was typed, not slide in from the side.
-- **`steps(n)` ease, where `n` is that row's character count.** This is what makes a smooth wipe read as *typing*. One tween per row still produces a discrete character-by-character reveal. This is the trick that buys the typewriter look at a fraction of the cost.
+Two of these are lifecycle rules rather than look, and they are the two most likely to be undone by accident:
 
-`autoSplit: true` requires the animation to be created **inside** `onSplit()` and **returned** from it. Creating it outside means it targets stale line elements after the first resize.
+- **The clip is permanent while the element can still grow.** It is not applied for the duration of a tween and cleared afterwards. Cleared, the next chunk's text is on screen for the frame between the framework writing it and the reveal pass running — text appears at full strength, disappears, then types itself in. For the same reason the *first* hide happens in the mount hook, which runs before the browser's first paint of that node; a frame later is already too late. An element stops being clipped only when it can no longer grow, and that unclip is also the safety net under every row-count assumption here.
+- **Never clip an element that carries chrome.** A code block's box, background and border are already on screen and stay there; only the text inside it types. Clipping the container animates the box in, which is a different and wrong statement about what happened. Where the chrome and the text are the same element — the pinned command line, a fenced block — the text gets its own inner element and the reveal goes on that.
+
+Four more properties carry the look, and they are the part that is binding:
+
+- **A `clipPath` wipe, not a slide.** The row is revealed left-to-right while the text stays put. Text should appear where it lands, like it was typed, not slide in from the side.
+- **The wipe is quantized to a character grid**, not smooth. This is what makes a wipe read as *typing*, and it is the same trick `steps(n)` bought in the original rule — moved from the ease onto the cursor's row.
+- **The row is the unit.** The cursor is measured in rendered rows, so a wrapped logical line still produces one reveal per visual row.
+- **Nothing in the DOM is touched.** No wrappers, so nothing to revert and nothing to leak — the "revert splits after reveal" guard below stops being a requirement rather than going unmet.
+
+What is genuinely lost is the overlap. The table's numbers are a 0.225s wipe every 0.096s, so consecutive rows are in flight together; one cursor cannot be on two rows at once, so each row's wipe lasts one stagger interval instead. The last row still gets its full 0.225s — the tween's duration is `(rows - 1) * stagger + 0.225`, so a one-row reveal (a heading, a result line, the echoed command) is exactly the tween the table specifies.
+
+**Rows are the rows on screen right now.** They are measured from the element's rendered height, so the same text at half the width is twice as many rows and gets twice as many reveals — the stagger still runs from its first row to its last. Do not hand-roll this with `Range.getClientRects()`, and do not derive it from the string: a wrap is a layout fact.
+
+The row count comes from height over line box, which is why `.block` sets an explicit `line-height` — `normal` resolves per font and is reported back verbatim by some browsers. The *band* for one row is then the element's real height divided by that count, not the line box itself: the two agree for uniform text, and where they do not, dividing the real height is what puts the last row's bottom edge on the element's bottom edge. That is load-bearing, because the resting clip sits exactly there and a band a pixel short would hide the final row permanently.
 
 ### Applies to
 
@@ -367,9 +377,9 @@ The echoed command line (`> path/to/cwd` + the typed text) is one row, revealed 
 
 ### The scroll mode changes the rate, not the effect
 
-"Move down" (see `SCROLL_MODES`) exists for the reader who does not want to watch output arrive from the top. Playing the normal 0.12s stagger in that mode contradicts the point of it — the view is at the tail specifically to be current, and a reveal paced for reading makes it permanently behind.
+"Move down" (see `SCROLL_MODES`) exists for the reader who does not want to watch output arrive from the top. Playing the normal 0.096s stagger in that mode contradicts the point of it — the view is at the tail specifically to be current, and a reveal paced for reading makes it permanently behind.
 
-**In "move down", the stagger scales with the backlog rather than being a constant.** The deeper the queue of unrevealed rows, the faster each one lands, converging on instant. Concretely: the stagger is the reading-paced 0.12s when there is nothing queued, and falls toward zero as the queue fills, hitting the flood-control threshold below at the same point it would anyway.
+**In "move down", the stagger scales with the backlog rather than being a constant.** The deeper the queue of unrevealed rows, the faster each one lands, converging on instant. Concretely: the stagger is the reading-paced 0.096s when there is nothing queued, and falls toward zero as the queue fills, hitting the flood-control threshold below at the same point it would anyway.
 
 This is a rate curve, not a second animation. The wipe, the `steps(n)` ease, and the row-level split are identical in both modes — the reveal must look the same, or the setting becomes a choice between two different products. What changes is only how long each row takes.
 
@@ -379,7 +389,9 @@ The same reasoning already governs the scroll itself: `tailDuration()` scales th
 
 Real commands do not emit twenty tidy lines. `npm install` emits thousands, fast.
 
-**Rule: the animation queue never exceeds ~40 pending rows.** Past that, reveal instantly (`gsap.set`, no tween, no stagger). At 0.12s per row, forty rows is already 4.8 seconds of backlog — beyond that the terminal is lying about what has finished.
+**Rule: only rows inside the viewport are ever animated.** The reveal's span is the intersection of the rows still owed with the rows currently on screen. Rows above the viewport have been scrolled past; rows below its bottom edge are off screen. Both are simply shown — a reveal nobody can watch is cost with no effect, and on a long command it is nearly all of the output. This is also what makes "move down" cheap without a second mechanism: the tail is the only thing on screen, so the tail is the only thing that animates, however many rows the command produced.
+
+**Rule: the animation queue never exceeds ~40 pending rows.** Pending is counted after the viewport clamp above. Past that, reveal instantly (`gsap.set`, no tween, no stagger). At 0.096s per row, forty rows is already ~3.8 seconds of backlog — beyond that the terminal is lying about what has finished.
 
 Implement as a single check before animating a batch:
 
@@ -394,8 +406,10 @@ if (pending.length > 40) {
 
 Additional guards:
 
-- **Off-screen blocks do not animate.** If the user has scrolled away from the tail, reveal instantly. Never animate what nobody is looking at.
-- **Revert splits once revealed.** `SplitText` produces one `<div>` per row. In a long scrollback that is tens of thousands of elements. Call `.revert()` on a block's split after its reveal completes — the animation is done, the DOM cost is not.
+- **Off-screen blocks do not animate.** Falls out of the viewport clamp above: an element with no visible rows has nothing to animate and is shown outright.
+- **Leave no per-row DOM behind.** The staircase creates none, which is half of why it is the mechanism. If a future reveal ever does create wrappers, they come down when the reveal completes — one `<div>` per row over a long scrollback is tens of thousands of elements.
+- **Stop tracking finished elements.** Only the last block can still grow. Anything above it is final, and a map keyed by element otherwise holds one entry per rendered node for the life of the session.
+- **A resize is not new content.** Reflow changes an element's row count without changing what it says. Re-baseline every tracked element on resize, or dragging the window edge replays the reveal over output that has been on screen for minutes. Same shape as the height-tween guard above.
 - **Kill on interrupt.** Ctrl+C, `clear`, and unmount must `.kill()` every in-flight tween for that block.
 
 ## Block chrome
@@ -449,7 +463,7 @@ The glitch is the item on this list that matters most. Simulated malfunction is 
 
 ## Cleanup
 
-Svelte components must return a cleanup function from `onMount` that kills timelines, reverts `SplitText` instances, and calls `mm.revert()`. A terminal session runs for hours; leaked tweens compound.
+Svelte components must return a cleanup function from `onMount` that kills every timeline, drops every tracked element, and calls `mm.revert()`. A terminal session runs for hours; leaked tweens compound. Killing a reveal means letting it *land* — `progress(1)` before `kill()`, then clear the clip — because a killed tween leaves the element wherever the playhead stopped, and for this animation that is output cut in half.
 
 ## Do not
 
@@ -457,7 +471,8 @@ Svelte components must return a cleanup function from `onMount` that kills timel
 - ❌ Animate `width`/`height`/`top`/`left`.
 - ❌ Animate anything inside the raw xterm.js fallback view. That view is a real terminal — it renders at the speed the program writes, with no interception. Only the crossfade into and out of it is animated.
 - ❌ Set `will-change` globally. Only on elements actually mid-animation.
-- ❌ Create animations outside `onSplit()` when `autoSplit` is on.
+- ❌ Pass `overwrite: true`. It kills every tween on the target, not the conflicting one — a hover tween takes out the entrance that was still playing and strands the element half-faded. Use `overwrite: "auto"`, and scope `killTweensOf` to the properties the caller actually owns.
+- ❌ Rebuild the children of an element a framework is rendering into. That includes `SplitText` on command output — see the reveal.
 - ❌ Ship `GSDevTools`.
 - ❌ Move two elements at full amplitude in the same action. One focal, everything else at 40% with no overshoot.
 - ❌ Use the elastic bounce on an element that is losing focus, or the discrete settle on one that is gaining it. The two carry meaning.

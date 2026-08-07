@@ -25,11 +25,14 @@ The plugins installed for this repo are not optional decoration. Use them by def
 - **ui-ux-pro-max** — vendored under [.claude/skills/](.claude/skills/) from [ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill). Load before any visual or interaction change. Its `scripts/search.py` **cannot run on this machine** — there is no Python here, only the Windows Store alias stub — so query `data/*.csv` and `references/` directly with grep instead of the documented CLI. Only the `ui-ux-pro-max` skill was installed; the kit's logo, banner, brand, slide, and canvas-font skills are for marketing asset generation and have no bearing on a terminal.
 - **svelte-skills** — vendored under [.claude/skills/](.claude/skills/) from [svelte-skills-kit](https://github.com/spences10/svelte-skills-kit). Load `svelte-runes` before touching reactive state, `svelte-styling` before scoped CSS or `:global`, `svelte-template-directives` for `{@attach}` / `{@render}`. The runes skill is the one that matters most here: the worst bug in this codebase so far was a plain `let` read in the template, which Svelte 5 compiles to a constant read. Five of the kit's ten skills were dropped on install — LayerChart, remote functions, load functions, routing/SSR, and the upstream author's own ecosystem guide. This is an SPA with one route, `ssr = false`, and no server, so those are not merely unused; following them would be wrong. Re-add from upstream if that ever changes.
 
+[CHANGELOG.md](CHANGELOG.md) is one line per change — what changed, plus the cause or constraint if it is not obvious. No rationale essays, no feature tours, no selling the change back to the reader. The reasoning belongs in the phase docs and `decisions.md`.
+
 ## Layout
 
 - `src-tauri/src/pty.rs` — PTY session, streams raw bytes to the frontend over a Tauri channel.
 - `src-tauri/src/screenshot.rs` — F2 debug capture. Writes `demo/` and rewrites the README gallery. Dev-only: the path comes from `CARGO_MANIFEST_DIR`.
 - `src/lib/parse.js` — output → AST. Self-check: `node src/lib/parse.check.mjs`.
+- `src/lib/reveal.js` — typewriter clip geometry. Self-check: `node src/lib/reveal.check.mjs`.
 - `src/routes/+page.svelte` — terminal view.
 
 ## Architecture

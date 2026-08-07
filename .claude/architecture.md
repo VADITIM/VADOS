@@ -42,7 +42,7 @@ Rule 3 is what makes rules 1 and 2 safe to be wrong about.
 | Build | Vite 6 |
 | Terminal process | `portable-pty` 0.9 |
 | Raw terminal render | xterm.js (`@xterm/xterm` + `@xterm/addon-fit`) — **fallback only** |
-| Animation | GSAP (+ SplitText) |
+| Animation | GSAP (+ ScrollToPlugin, EasePack) — **not** SplitText, see [decisions.md](decisions.md) |
 | Config | TOML (`toml` crate), watched with `notify` |
 | Styles | A CSS custom-property token layer on `:root` (no preprocessor) |
 

@@ -11,6 +11,8 @@
 
 - **Structured output, not a markdown string.** `src/lib/parse.js` turns `buffer` into `heading` / `list` / `text` nodes and the component renders them as DOM. No markup is generated or re-parsed, so arbitrary command output can never be read as markup — Svelte escapes text nodes. Two rules so far: a line ending in `:` is a heading, and the body under it becomes a list only if it has 2+ lines (so `npm`'s `Usage:` lists but `All commands:` stays prose). One blank line between heading and body is allowed; the next blank ends the group. Self-check: `node src/lib/parse.check.mjs`.
 
+- **A whole command is one inline code run.** A known command name, an optional known subcommand verb, and every argument-shaped token after them — so `git diff --no-index [<options>] <path>` is one span rather than a lone backticked `--no-index` sitting inside plain prose. Both lists are curated in `parse.js` rather than detected; see [../decisions.md](../decisions.md) for why, and for why the subcommand list is a whitelist after a blacklist failed on "git is not installed" and "cmd instead". Two things the rule needs that are not obvious: a bare relative path (`src/lib`) counts as an argument *only inside a command run*, because the general path rule refuses it on purpose (it would read the `/OS` in `VAD/OS` as a path); and every gap inside a run is `[ \t]`, never `\s`, since `\s` matches a newline and a token crossing a line break lands in the wrong node.
+
 ## Still to do
 
 Phase 3 closes once blocks render reliably. The renderer's future — a real parser, the classifier, streaming, folding — is [phase-8-markdown-engine.md](phase-8-markdown-engine.md), not more scope here. Anything below that is not a bug in the existing structure belongs there.
@@ -58,6 +60,7 @@ Phase 3 closes once blocks render reliably. The renderer's future — a real par
 
 - **ASCII art and banners must survive.** They live in the `<pre>` container with `white-space: pre` and monospace. Prose markdown styling must never touch them. This is the single most likely thing to break.
 - Carriage returns (`\r`) used for in-place progress bar redraws must be handled — naive appending turns one progress bar into hundreds of lines.
+- **Two kinds of line break reach the snapshot and only one of them is real.** xterm's own soft wrap is flagged (`isWrapped`) and joined. PowerShell wraps its error records itself, at the console width, with a genuine newline — nothing flags those, and most of them belong in the output. The exception is a word longer than a line: it has no wrap point, so PowerShell cuts it mid-word, and keeping that break puts a space in the middle of a token in both the rendered block and the markdown export. `splitWord` in `src/routes/+page.svelte` rejoins exactly that case, off the shape of the seam. A word that happens to end on the last column, followed by a new logical line, is indistinguishable from a split and gets joined — the emitting program's own wrap width is not something the PTY carries.
 - Long scrollback: consider virtualising or capping retained blocks. See [../tasks.md](../tasks.md).
 
 ## Open questions
