@@ -1,7 +1,7 @@
 // Self-check for reveal-plan.js. Plain node, no test framework:
 //   node src/lib/reveal-plan.check.mjs
 import assert from "node:assert/strict";
-import { labelTier, labelGroups, LABEL_TIERS } from "./reveal-plan.js";
+import { labelTier, labelGroups, splittable, LABEL_TIERS } from "./reveal-plan.js";
 
 // A status colour is the loudest thing in a block and goes first.
 assert.equal(labelTier(["md-heading", "warn"]), 0);
@@ -56,5 +56,12 @@ assert.deepEqual(
 
 // Nothing colourful at all means no label beats, so the element is pure wave.
 assert.deepEqual(labelGroups(["tok-str", "block-body"], classesOf), []);
+
+// A list row is never character-split — the row is the list's reveal unit and
+// it rises as one piece. Everything else still splits.
+assert.equal(splittable(["md-row"]), false);
+assert.equal(splittable(["block-body"]), true);
+assert.equal(splittable(["code-text"]), true);
+assert.equal(splittable([]), true);
 
 console.log("reveal-plan.js self-check passed");

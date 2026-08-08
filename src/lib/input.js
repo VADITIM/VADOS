@@ -35,6 +35,28 @@ export function quotePath(path, windows = /^[A-Za-z]:[\\/]/.test(path) || path.i
 }
 
 /**
+ * The inverse of `quotePath`, for a path the app itself has to act on rather
+ * than hand to a shell — `open <file>` is the only caller today.
+ *
+ * Deliberately not a shell word parser: it undoes one surrounding pair of
+ * quotes and the doubled-quote escape inside it, which is what a drop or a Tab
+ * completion produces and what a person types around a path with a space. A
+ * line with quoting anywhere other than the ends is a sentence for the shell,
+ * not a path for us.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function unquote(text) {
+  const trimmed = text.trim();
+  const quote = trimmed[0];
+  if ((quote !== '"' && quote !== "'") || trimmed.length < 2 || trimmed.at(-1) !== quote) {
+    return trimmed;
+  }
+  return trimmed.slice(1, -1).replaceAll(quote + quote, quote);
+}
+
+/**
  * How a file of a given extension is run. Values are command prefixes; the
  * quoted path is appended to each. Curated rather than detected for the same
  * reason `parse.js` curates its command list: reading PATH would cover every
@@ -67,7 +89,12 @@ const RUNNERS = {
  * One line the suggestion strip can offer: the text that goes at the prompt,
  * and a word saying what it is.
  *
- * @typedef {{ text: string, hint: string }} Suggestion
+ * `start` is the column the text replaces *from*, for the cases where that is
+ * not the token under the cursor — a whole-line history match replaces from
+ * column 0. Absent means "the strip's own start", which is what every
+ * token-shaped suggestion in this file wants.
+ *
+ * @typedef {{ text: string, hint: string, start?: number }} Suggestion
  */
 
 /**
@@ -192,7 +219,11 @@ export function resolveDir(cwd, dir) {
 export function completions(entries, base, dir, windows) {
   const lower = base.toLowerCase();
   const sep = windows ? "\\" : "/";
-  return entries
+  // `..` is not in any listing and is the one directory everybody needs. Its
+  // absence is why "how do I go up a folder" had no answer on screen: the only
+  // way up was to already know `cd ..`. Added here rather than in `list_dir`,
+  // because it is not a fact about the directory — it is a completion.
+  return [{ name: "..", dir: true }, ...entries]
     .filter((entry) => entry.name.toLowerCase().startsWith(lower))
     .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name))
     .map((entry) => ({
@@ -201,6 +232,75 @@ export function completions(entries, base, dir, windows) {
       text: quotePath(dir + entry.name + (entry.dir ? sep : ""), windows),
       hint: entry.dir ? "dir" : "file",
     }));
+}
+
+/**
+ * Suggestions for the word being typed that come from a *list*, not from the
+ * filesystem — the strip's other three sources, ranked most personal first:
+ *
+ *  1. **What you ran before**, whole line, newest first. The strongest signal
+ *     there is: a thing this user typed at this prompt. It replaces from column
+ *     0, which is why `start` exists on a `Suggestion` at all.
+ *  2. **A command name**, while the first word is still being typed. This is
+ *     what makes the strip exist in a fresh session, which history alone cannot
+ *     — a new window has nothing to remember.
+ *  3. **A subcommand verb**, on the second word of a known command.
+ *
+ * Paths are not here; they are `completions`, because they need a directory
+ * listing and these do not. Between them they cover every position in a command
+ * line, which is the thing two earlier versions of this got wrong by covering
+ * only the positions the data happened to fit.
+ *
+ * The curated lists come from `parse.js`, which already had to know what a
+ * command looks like in order to render one. Reading `PATH` instead would cover
+ * every binary on the machine — see the `ponytail:` note there for why it does
+ * not.
+ *
+ * @param {string} text     The whole typed line.
+ * @param {number} col      Cursor column.
+ * @param {string[]} history  Newest first.
+ * @param {string[]} commands
+ * @param {string[]} subcommands
+ * @returns {Suggestion[]}
+ */
+export function wordSuggestions(text, col, history, commands, subcommands) {
+  if (!text) return [];
+  /** @type {Suggestion[]} */
+  const lines = history
+    .filter((h) => h.length > text.length && h.startsWith(text))
+    .map((h) => ({ text: h, hint: "history", start: 0 }));
+
+  const { start, token } = tokenAt(text, col);
+  const space = text.indexOf(" ");
+  // A trailing space is not "typing the next word" — there is no prefix to
+  // complete yet, and offering the first name in a list at that point is a
+  // guess rather than a completion.
+  if (!token) return lines;
+
+  let pool = /** @type {string[]} */ ([]);
+  let hint = "";
+  if (space === -1) {
+    pool = commands;
+    hint = "command";
+  } else if (start === space + 1 && commands.includes(text.slice(0, space))) {
+    pool = subcommands;
+    hint = "verb";
+  }
+
+  const lower = token.toLowerCase();
+  const seen = new Set();
+  /** @type {Suggestion[]} */
+  const words = [];
+  for (const name of pool) {
+    if (name.length <= token.length || !name.toLowerCase().startsWith(lower)) continue;
+    // The subcommand list has honest duplicates — `exec`, `cp`, `ls` are each in
+    // it twice because they group differently for different tools. One strip
+    // entry each.
+    if (seen.has(name)) continue;
+    seen.add(name);
+    words.push({ text: name, hint, start });
+  }
+  return [...lines, ...words];
 }
 
 /**

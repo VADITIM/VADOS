@@ -1,6 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { Channel, invoke } from "@tauri-apps/api/core";
+  import { startDrag } from "@crabnebula/tauri-plugin-drag";
+  import { listen } from "@tauri-apps/api/event";
+  import { open } from "@tauri-apps/plugin-dialog";
   // Tauri's own drag-and-drop, never the HTML5 `drop` event. See `watchDrops`.
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { Terminal, type IMarker } from "@xterm/xterm";
@@ -10,14 +13,35 @@
   import { ScrollToPlugin } from "gsap/ScrollToPlugin";
   import { RoughEase } from "gsap/EasePack";
   import banner from "$lib/banner.txt?raw";
-  import { parse, toMarkdown } from "$lib/parse.js";
-  // The reveal's geometry lives in its own module so it can be checked without
-  // a browser: `node src/lib/reveal.check.mjs`.
-  import { revealClip, revealHead, revealStagger } from "$lib/reveal.js";
+  // `COMMAND_NAMES` / `SUBCOMMAND_NAMES` are the parser's curated lists, reused
+  // by the input bar's ghost completion — the parser already had to know what a
+  // command looks like to render one, and a second list would drift from it.
+  import { COMMAND_NAMES, SUBCOMMAND_NAMES, parse, runHint, toMarkdown } from "$lib/parse.js";
   // Which reveal a run of parsed text gets, and in what order — read off the
   // classes the parser's own decisions put on it. Checked without a browser:
   // `node src/lib/reveal-plan.check.mjs`.
-  import { labelGroups } from "$lib/reveal-plan.js";
+  import { labelGroups, splittable } from "$lib/reveal-plan.js";
+  // The one animation value shared between two surfaces — the settings overlay
+  // and the suggestion strip arrive the same way on purpose.
+  import { GLITCH_IN } from "$lib/anim.js";
+  // The settings overlay owns its own markup, CSS and entrance. This file keeps
+  // the values and does the applying, which is all DOM.
+  import Settings from "$lib/components/Settings.svelte";
+  // Every setting as data: the keys `config.toml` stores, the labels the
+  // settings panel renders, and what each mode resolves to.
+  import {
+    ACCENTS,
+    FONT_MODES,
+    REVEAL_MODES,
+    SCROLL_MODES,
+    WEDGES,
+    pick,
+    type Accent,
+    type Config,
+    type FontMode,
+    type RevealMode,
+    type ScrollMode,
+  } from "$lib/settings.js";
   // Everything the docked input bar computes that is not DOM — the suggestion
   // strip's items and the mirrored line's selected runs. Checked without a
   // browser: `node src/lib/input.check.mjs`.
@@ -30,6 +54,8 @@
     segments,
     step,
     tokenAt,
+    unquote,
+    wordSuggestions,
   } from "$lib/input.js";
 
   type Node = ReturnType<typeof parse>[number];
@@ -44,173 +70,104 @@
   // divider element clips it to width, so overshoot is free and safe.
   const dividerLine = "<<>>".repeat(60);
 
-  // #region ── font modes ─────────────────────────────────────────────────────
-  // Two slots, not four font stacks: text *outside* a module and text *inside*
-  // one (see the glossary in .claude/architecture.md). Every mode is a pair of
-  // assignments to those two slots, so adding a mode is a row here and nothing
-  // else. Code blocks and the raw view ignore both and stay mono
-  // unconditionally — alignment is load-bearing there.
-  const FONT_MODES = {
-    mixed: {
-      label: "Mixed",
-      hint: "Recommended",
-      outside: "var(--font-mono)",
-      inside: "var(--font-sans)",
-    },
-    reverse: {
-      label: "Mixed Reverse",
-      hint: "Modules in mono",
-      outside: "var(--font-sans)",
-      inside: "var(--font-mono)",
-    },
-    sans: {
-      label: "Sans",
-      hint: "Sans everywhere",
-      outside: "var(--font-sans)",
-      inside: "var(--font-sans)",
-    },
-    modern: {
-      label: "Modern",
-      hint: "Mono everywhere",
-      outside: "var(--font-mono)",
-      inside: "var(--font-mono)",
-    },
-  } as const;
-
-  type FontMode = keyof typeof FONT_MODES;
-
-  /**
-   * Where each font mode sits on the settings X, in the table's own order.
-   * Positional by index rather than by name so the two lists cannot drift
-   * apart quietly: a fifth mode reads `undefined` here and the wedge is visibly
-   * unstyled, which is the failure anyone would rather have.
-   */
-  const WEDGES = ["wedge-tl", "wedge-tr", "wedge-bl", "wedge-br"] as const;
-
-  // Where the view lands when a new block opens. The two answers are genuinely
-  // a preference rather than a right and a wrong: anchoring the head near the
-  // top lets a long command read as a document from its first line, and jumping
-  // to the tail gets you to the newest output without waiting for it.
-  const SCROLL_MODES = {
-    top: {
-      label: "Stay on top",
-      hint: "Anchor the command line near the top",
-    },
-    bottom: {
-      label: "Move down",
-      hint: "Follow the newest output",
-    },
-  } as const;
-
-  type ScrollMode = keyof typeof SCROLL_MODES;
-
-  // Which reveal a piece of output gets is decided by whether it can still
-  // change. The typewriter is right for text that is *still arriving* — it is a
-  // picture of a program writing, and it is only honest while something is being
-  // written. It is wrong for text that was complete before it reached the
-  // screen, and running it there is what made it look messy: it was animating
-  // the wrong thing, not animating wrongly.
-  //
-  // So the typewriter is the rule *within* one setting rather than the setting
-  // itself: finished text gets the label reveal (a bar sweeps the coloured
-  // tokens, staggered by how much they matter) with a character wave under the
-  // grey prose between them, and only the one element still growing gets typed.
-  //
-  // The switch is whether any of that runs at all. `instant` is the answer for
-  // a reader who wants the output and not the picture of it: every element
-  // rises into place as one, the same gesture the settings panel enters with,
-  // and no text is ever typed or waved. It governs command output only — chrome
-  // (the panel, the suggestion strip, a block's border draw) is a response to a
-  // gesture the user just made and keeps its animation either way.
-  const REVEAL_MODES = {
-    typewriter: {
-      label: "Typewriter",
-      hint: "Type live output, sweep what is final",
-    },
-    instant: {
-      label: "Instant",
-      hint: "Output rises into place, no typing",
-    },
-  } as const;
-
-  type RevealMode = keyof typeof REVEAL_MODES;
-
-  // One value drives the whole accent surface — every tint, border and hover
-  // state derives from it with color-mix in the token layer, so a new accent
-  // is one row here and nothing else. Each is picked to be vibrant in its own
-  // right rather than a hue rotation of the indigo, which is why they are not
-  // all the same saturation.
-  const ACCENTS = {
-    indigo: { label: "Indigo", value: "#7e55dd" },
-    blue: { label: "Blue", value: "#4d7cfe" },
-    yellow: { label: "Yellow", value: "#f0b429" },
-    orange: { label: "Orange", value: "#fb7a2a" },
-    red: { label: "Red", value: "#e5484d" },
-    green: { label: "Green", value: "#30c98d" },
-    pink: { label: "Pink", value: "#ef5da8" },
-    // Not #fff: the accent is a *tint* source — every border and surface derives
-    // from it with color-mix, and pure white washes those out to grey. A hair
-    // off neutral keeps the derived layer readable.
-    white: { label: "White", value: "#e8e8ec" },
-  } as const;
-
-  type Accent = keyof typeof ACCENTS;
+  // #region ── settings ───────────────────────────────────────────────────────
+  // The tables themselves live in `$lib/settings.ts` — they are data, and
+  // `config.rs` stores their keys. What is left here is what applying one does,
+  // all of which is DOM.
 
   // How far down the viewport a newly anchored block head sits, in `dv` terms
   // per ANIMATION.md — a fraction of the scrollport, not a pixel constant.
   const ANCHOR_TOP = 0.05;
 
-  // ponytail: localStorage, not the TOML config — Phase 6 owns real settings
-  // and will supersede this wholesale. Two keys are cheaper than half a config
-  // system that gets thrown away.
-  function restore<T extends string>(key: string, valid: Record<T, unknown>, fallback: T): T {
-    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
-    return raw !== null && raw in valid ? (raw as T) : fallback;
+  let fontMode = $state<FontMode>("mixed");
+  let scrollMode = $state<ScrollMode>("top");
+  let accent = $state<Accent>("indigo");
+  let revealMode = $state<RevealMode>("reveal");
+  // Next-launch settings. They are shown and stored here, but nothing reads
+  // them at runtime: the shell's directory and the shell's token are both fixed
+  // at spawn, in Rust, before this file has run.
+  let startupDir = $state("");
+  let startAsAdmin = $state(false);
+
+  function currentConfig(): Config {
+    return {
+      appearance: { accent, font: fontMode },
+      behavior: { scroll: scrollMode, reveal: revealMode },
+      shell: { cwd: startupDir },
+      system: { start_as_admin: startAsAdmin },
+    };
   }
 
-  function remember(key: string, value: string) {
-    try {
-      localStorage.setItem(key, value);
-    } catch {
-      // Private mode or a locked-down webview. The setting still applies for
-      // this session; failing to remember it is not worth an error path.
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Write the whole document, coalesced.
+   *
+   * Coalesced because a swatch is a control someone drags an eye across —
+   * four clicks in a second is normal use, and each one is a file write plus a
+   * watcher round trip. The whole document every time because there is one
+   * writer and the file is a hundred bytes; a partial update would need a merge
+   * on the Rust side to protect against nothing.
+   */
+  function saveConfig() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      invoke("config_save", { config: currentConfig() }).catch(() => {
+        // A read-only config directory. The setting still applies for this
+        // session, which is the part the user just asked for.
+      });
+    }, 120);
+  }
+
+  /**
+   * Apply a config that came from the file — first load, or an external edit.
+   *
+   * Deliberately not routed through the setters: those exist to *record* a
+   * gesture (they save, and they play the glitch on the label the user just
+   * clicked). Neither is true of a change the file made, and saving here is
+   * exactly the write-loop the content guard in `config.rs` is defending
+   * against — it would just move the loop to this side of the boundary.
+   */
+  function applyConfig(c: Config) {
+    fontMode = pick(c.appearance.font, FONT_MODES, fontMode);
+    scrollMode = pick(c.behavior.scroll, SCROLL_MODES, scrollMode);
+    revealMode = pick(c.behavior.reveal, REVEAL_MODES, revealMode);
+    startupDir = c.shell.cwd ?? "";
+    startAsAdmin = !!c.system.start_as_admin;
+
+    const next = pick(c.appearance.accent, ACCENTS, accent);
+    if (next !== accent) {
+      accent = next;
+      document.documentElement.style.setProperty("--accent", ACCENTS[next].value);
+      applyTokens();
     }
-  }
-
-  let fontMode = $state<FontMode>(restore("vados.fontMode", FONT_MODES, "mixed"));
-  let scrollMode = $state<ScrollMode>(restore("vados.scrollMode", SCROLL_MODES, "top"));
-  let accent = $state<Accent>(restore("vados.accent", ACCENTS, "indigo"));
-  let revealMode = $state<RevealMode>(restore("vados.revealMode", REVEAL_MODES, "typewriter"));
-
-  // The label of the row that was clicked is handed in so the character
-  // flicker can play on it — a toggle changing state is the one place in this
-  // app the glitch is allowed, and the label is the element whose job at that
-  // moment is to say *this changed*. See `glitchLabel`.
-  function setFontMode(next: FontMode, label?: HTMLElement | null) {
-    fontMode = next;
-    remember("vados.fontMode", next);
-    glitchLabel(label);
-  }
-
-  function setScrollMode(next: ScrollMode, label?: HTMLElement | null) {
-    scrollMode = next;
-    remember("vados.scrollMode", next);
     resyncTail();
-    glitchLabel(label);
+  }
+
+  // The glitch that plays on the row that was clicked belongs to the panel and
+  // fires there — these only record the change and apply it.
+  function setFontMode(next: FontMode) {
+    fontMode = next;
+    saveConfig();
+  }
+
+  function setScrollMode(next: ScrollMode) {
+    scrollMode = next;
+    saveConfig();
+    resyncTail();
   }
 
   // Only what mounts after the switch changes: an element's reveal is decided
   // once, in the action, and re-deciding it for text already on screen would
   // replay output the reader has read.
-  function setRevealMode(next: RevealMode, label?: HTMLElement | null) {
+  function setRevealMode(next: RevealMode) {
     revealMode = next;
-    remember("vados.revealMode", next);
-    glitchLabel(label);
+    saveConfig();
   }
 
   function setAccent(next: Accent) {
     accent = next;
-    remember("vados.accent", next);
+    saveConfig();
     // Written to :root rather than a Svelte style: prop so the token layer
     // stays the single source, and everything derived from --accent updates
     // with it. applyTokens() carries it to whatever cannot read CSS.
@@ -218,8 +175,40 @@
     applyTokens();
   }
 
+  /**
+   * Both of these apply at spawn and nothing re-reads them, so changing one
+   * while a shell is running is a promise about the *next* one. The rows say so
+   * rather than appearing to do nothing — see `decisions.md`; restarting the
+   * session under the user is the one thing a terminal must never do on its own.
+   */
+  function setStartupDir(next: string) {
+    startupDir = next;
+    saveConfig();
+  }
+
+  async function pickStartupDir() {
+    // The native picker, not a text field with a paste in it: the value is a
+    // path on this machine and the OS already owns the widget for that.
+    const picked = await open({ directory: true, defaultPath: startupDir || undefined }).catch(
+      () => null,
+    );
+    if (typeof picked === "string") setStartupDir(picked);
+  }
+
+  /**
+   * The *host*, not the shell. `shellIsWindows()` answers a different question
+   * — it reads the cwd's shape to quote a dropped path — and a Git Bash session
+   * on Windows would answer it "no" while the elevation story stays Windows'.
+   */
+  const IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+
+  function setStartAsAdmin(next: boolean) {
+    startAsAdmin = next;
+    saveConfig();
+  }
+
   let settingsOpen = $state(false);
-  let settingsBackdrop = $state<HTMLElement | undefined>();
+  let settingsPanel: Settings | undefined = $state();
   // #endregion ────────────────────────────────────────────────────────────────
 
   type Block = {
@@ -228,6 +217,21 @@
     /** The typed command line. Always plain text, never markdown-rendered. */
     command: string;
     buffer: string;
+    /**
+     * The part of `buffer` the block renderer is currently showing.
+     *
+     * Structure is re-derived from the whole buffer on every change, and a
+     * buffer that is still growing is a buffer whose structure is still wrong:
+     * `ping`'s header is a heading with one reply under it, then a heading with
+     * a list, so the reply mounts as prose and is thrown away a moment later.
+     * The same half-parsed state is what made `npm --help` land at one height
+     * and jump to another. So structure is only taken when the stream is
+     * *quiet* — see `showSoon`. The raw bytes keep arriving into `buffer`
+     * meanwhile; nothing is lost, it is only shown a frame or two later.
+     *
+     * Undefined on blocks VAD/OS writes itself, which are complete on arrival.
+     */
+    shown?: string;
     closed: boolean;
     exitCode: number | null;
     /** False only for the startup banner — ASCII art, not command output. */
@@ -245,7 +249,7 @@
 
   /** Rendering, clipboard, and export all read a block through this one call. */
   function blockNodes(block: Block): Node[] {
-    return block.nodes ?? parse(block.buffer);
+    return block.nodes ?? parse(block.shown ?? block.buffer, block.command);
   }
 
   let wrapper: HTMLDivElement;
@@ -303,6 +307,156 @@
   // same absolute range so the selection cannot swallow the caret between them.
   const headSegments = $derived(segments(input.slice(0, cursorCol), 0, selFrom, selTo));
   const tailSegments = $derived(segments(input.slice(cursorCol), cursorCol, selFrom, selTo));
+
+  /**
+   * Commands run this session, newest first, no duplicates.
+   *
+   * ponytail: this session only, and it is why the curated lists below are not
+   * optional — a fresh window has nothing to remember, which is exactly when
+   * the feature was first reported missing. The shell keeps a far better
+   * history and persists it (PSReadLine writes `ConsoleHost_history.txt`), but
+   * reading it means knowing which shell is on the other end and where *that*
+   * shell puts its history, which is phase 12's registry and not something to
+   * guess at from the terminal side.
+   */
+  let history = $state<string[]>([]);
+
+  /** Longest a suggestion may be, so one pasted monster does not own the bar. */
+  const GHOST_MAX = 200;
+
+  function remember(command: string) {
+    const at = history.indexOf(command);
+    if (at >= 0) history.splice(at, 1);
+    history.unshift(command);
+    if (history.length > 200) history.pop();
+  }
+
+  /**
+   * When a suggestion may be offered at all.
+   *
+   * Only ever with the caret at the very end of the line, and never during a
+   * selection. Text after the caret is text the shell will put *before* the
+   * completion, so a suggestion mid-line would be a prediction about a line
+   * nobody is typing.
+   *
+   * `.by` rather than the expression form: `menuAuto` is declared further down
+   * with the rest of the suggestion strip, and the expression form is evaluated
+   * where it is written.
+   */
+  const suggestLive = $derived.by(
+    () =>
+      atPrompt &&
+      !!input &&
+      selTo <= selFrom &&
+      cursorCol === input.length &&
+      // A drop owns the strip outright while its options are up: those are
+      // "how do you want to run this", not "what word is this".
+      (!menuOpen || menuAuto),
+  );
+
+  /**
+   * The directory the path suggestions need listed, or `""`.
+   *
+   * Only ever past the first word: the first word is a command, and a directory
+   * listing is not what completes one.
+   */
+  const suggestDir = $derived.by(() => {
+    if (!suggestLive || !input.includes(" ")) return "";
+    const { token } = tokenAt(input, cursorCol);
+    return resolveDir(promptCwd, completionRequest(token).dir);
+  });
+
+  /**
+   * Listings, so suggestions can be derived synchronously while `list_dir` is a
+   * round trip. A plain `Map` and a version counter rather than reactive state:
+   * an effect that both reads and writes the same `$state` re-triggers itself,
+   * and this one writes on every listing.
+   *
+   * Cleared at every prompt. A listing is only as good as the moment it was
+   * taken, and a command that just ran is exactly what creates and deletes
+   * files — so the cache is worth one command's worth of keystrokes and no
+   * more. That costs one `list_dir` per prompt, and only when a path is
+   * actually being typed.
+   */
+  const dirCache = new Map<string, { name: string; dir: boolean }[]>();
+  let dirVersion = $state(0);
+
+  $effect(() => {
+    const path = suggestDir;
+    if (!path || dirCache.has(path)) return;
+    invoke<{ name: string; dir: boolean }[]>("list_dir", { path })
+      .then((entries) => {
+        dirCache.set(path, entries);
+        dirVersion++;
+      })
+      .catch(() => {});
+  });
+
+  /**
+   * Every match for the word being typed, best first — history and the curated
+   * lists, then the directory. This is *one* list feeding two views of itself:
+   * the strip shows which match is selected and how many there are, the ghost
+   * shows that same match inline where it would land. One selection, moved only
+   * by the arrows, for the same reason there is one focused block.
+   */
+  const suggestItems = $derived.by(() => {
+    if (!suggestLive) return [] as Suggestion[];
+    const words = wordSuggestions(input, cursorCol, history, GHOST_COMMANDS, SUBCOMMAND_NAMES);
+    if (!suggestDir) return words;
+    // Read so this re-runs when a listing lands. The `Map` itself is not
+    // reactive — that is the point of it.
+    dirVersion;
+    const entries = dirCache.get(suggestDir);
+    if (!entries) return words;
+    const { start, token } = tokenAt(input, cursorCol);
+    const { dir, base } = completionRequest(token);
+    const paths = completions(entries, base, dir, shellIsWindows()).map((item) => ({
+      ...item,
+      start,
+    }));
+    return [...words, ...paths];
+  });
+
+  /**
+   * The selected match, rendered inline after the caret as the characters it
+   * would add.
+   *
+   * Compared case-insensitively, so `cla` still shows the rest of `CLAUDE.md`.
+   * The typed prefix keeps its own case on screen because it is the shell's
+   * text and not ours to rewrite — but accepting replaces the whole word, so
+   * what actually lands is the name as it is spelled on disk.
+   */
+  const ghost = $derived.by(() => {
+    const item = suggestItems[menuIndex];
+    if (!item) return "";
+    const typed = input.slice(item.start ?? 0, cursorCol);
+    if (!item.text.toLowerCase().startsWith(typed.toLowerCase())) return "";
+    return item.text.slice(typed.length, typed.length + GHOST_MAX);
+  });
+
+  /**
+   * Keep the strip showing the current matches.
+   *
+   * `untrack` around everything this writes, and it is not a nicety: the strip's
+   * own open state feeds back into `suggestLive`, so an effect that both read
+   * and wrote it would re-enter itself on every keystroke. It also protects the
+   * selection — `menuIndex` must survive a run where the matches did not change,
+   * or the arrows would be undone by the next chunk of PTY output.
+   */
+  $effect(() => {
+    const items = suggestItems;
+    untrack(() => {
+      if (!items.length) {
+        if (menuAuto && menuOpen) closeMenu();
+        return;
+      }
+      const same =
+        items.length === menuItems.length && items.every((it, i) => it.text === menuItems[i]?.text);
+      if (menuOpen && menuAuto && same) return;
+      menuAuto = true;
+      openMenu(items, items[0].start ?? cursorCol);
+    });
+  });
   // Solid while keystrokes are landing — a blinking target is hard to track
   // mid-edit. Resumes blinking once the row goes quiet.
   let typing = $state(false);
@@ -404,6 +558,69 @@
     ro.observe(node);
     return { destroy: () => ro.disconnect() };
   }
+  /**
+   * A block's first content landing, animated rather than snapped.
+   *
+   * Height is banned everywhere else in ANIMATION.md and sanctioned here: the
+   * box goes from a head and a loading bar to a screenful in one frame, and
+   * that snap moves everything below it under the reader. `scaleY` is not an
+   * option — the content is text and the squash is visible.
+   *
+   * **Only the first growth.** After that the command is streaming, and a tween
+   * per chunk would fight both the next chunk and the scroll sync. So the
+   * observer disconnects the moment it has animated once, which also satisfies
+   * the doc's unobserve-before-tween guard by never observing again.
+   */
+  function growBlock(node: HTMLElement) {
+    if (reduceMotion) return;
+    let prev = node.getBoundingClientRect().height;
+    let tween: gsap.core.Tween | undefined;
+
+    // A window resize is not a content change: without this the box latches
+    // onto a mid-tween size and chases it for the rest of the drag.
+    const cancel = () => {
+      tween?.kill();
+      node.style.removeProperty("height");
+      node.removeAttribute("data-growing");
+    };
+
+    const ro = new ResizeObserver(() => {
+      const next = node.getBoundingClientRect().height;
+      // Only a real jump is worth animating. A pixel of reflow is not.
+      if (next <= prev + 1) {
+        prev = next;
+        return;
+      }
+      ro.disconnect();
+      window.addEventListener("resize", cancel);
+      // Tells the growth observer that the shrink it is about to see is ours.
+      node.setAttribute("data-growing", "");
+      tween = gsap.fromTo(
+        node,
+        { height: prev },
+        {
+          height: next,
+          duration: 0.45,
+          ease: "power3.out",
+          overwrite: "auto",
+          onComplete: () => {
+            node.style.removeProperty("height");
+            node.removeAttribute("data-growing");
+            window.removeEventListener("resize", cancel);
+          },
+        },
+      );
+    });
+    ro.observe(node);
+    return {
+      destroy() {
+        ro.disconnect();
+        cancel();
+        window.removeEventListener("resize", cancel);
+      },
+    };
+  }
+
   // integration.ps1's exact, known template — "PS <cwd>> ". Stripped from the
   // cursor row directly rather than remembered as a column offset: a column
   // captured once at 133;B goes stale across a resize (reflow shifts every
@@ -536,10 +753,13 @@
   }
 
   function openBlock(command: string) {
+    // A submitted command puts the reader back at the input bar, so whatever
+    // was selected in the scrollback is not what the next key acts on.
+    focusedId = null;
     const id = nextId++;
     const marker = term?.registerMarker(0);
     if (marker) markers.set(id, marker);
-    blocks.push({ id, cwd: lastCwd, command, buffer: "", closed: false, exitCode: null, md: true });
+    blocks.push({ id, cwd: lastCwd, command, buffer: "", shown: "", closed: false, exitCode: null, md: true });
   }
 
   /**
@@ -548,14 +768,68 @@
    * is what anyone who has used a chat client tries first, and neither should
    * be the wrong guess.
    */
-  const LOCAL_COMMANDS: Record<string, () => void> = {
+  const LOCAL_COMMANDS: Record<string, (args: string) => void> = {
     clear: clearBlocks,
     cls: clearBlocks,
     help: showHelp,
+    open: openFile,
   };
 
+  /**
+   * The commands above that take the rest of the line. Everything else matches
+   * a bare line only, and that distinction is load-bearing rather than tidy:
+   * PowerShell's `help` *is* `Get-Help`, so `help git` is a real shell command
+   * and must reach the shell, while a bare `help` is ours.
+   */
+  const LOCAL_ARGS = new Set(["open"]);
+
+  /**
+   * What can complete a first word in the ghost suggestion: the commands
+   * VAD/OS answers itself, then the parser's curated list. Ours first because
+   * they are the ones nothing else on the machine would ever suggest — `help`
+   * and `open` are as much commands as `git` is, and leaving the app's own
+   * vocabulary out of its own completion is the kind of gap nobody reports
+   * because they assume it was deliberate.
+   */
+  const GHOST_COMMANDS = [...Object.keys(LOCAL_COMMANDS), ...COMMAND_NAMES];
+
   function localCommand(command: string): (() => void) | undefined {
-    return LOCAL_COMMANDS[command.trim().replace(/^\/\s*/, "").toLowerCase()];
+    const line = command.trim().replace(/^\/\s*/, "");
+    const name = (/^\S+/.exec(line) ?? [""])[0].toLowerCase();
+    const run = LOCAL_COMMANDS[name];
+    if (!run) return undefined;
+    const args = line.slice(name.length).trim();
+    if (args && !LOCAL_ARGS.has(name)) return undefined;
+    return () => run(args);
+  }
+
+  /**
+   * `open <file>` — hand a path to whatever the OS opens it with.
+   *
+   * ponytail: the OS default handler, not an editor resolved from config or
+   * `$EDITOR`. "Open" already means "the thing this file opens in" everywhere
+   * else on the machine, `tauri-plugin-opener` is already a dependency, and an
+   * editor setting is a row in a settings panel that nobody has asked for yet.
+   * Add one when the default is wrong for somebody, and it lands next to the
+   * shell picker in phase 12 where the rest of "which binary" lives.
+   *
+   * A local command never reaches the shell, so there is no exit code and no
+   * block — a toast either way is the whole result surface.
+   *
+   * Goes through our own Rust command rather than the opener plugin's JS one.
+   * The plugin's JS side is guarded by a path scope, which a terminal cannot
+   * fill in: the path is whatever the user typed. See `dir.rs`.
+   */
+  async function openFile(args: string) {
+    const path = unquote(args);
+    if (!path) return notify("open needs a path");
+    // Same join the completion menu uses, so `open src/lib` resolves against
+    // the prompt's cwd exactly as Tab does. `~` is passed through untouched by
+    // it and will fail here as a directory that is not there — the same
+    // ponytail corner, and the same fix (the shell registry knows whose home).
+    await invoke("open_path", { path: resolveDir(promptCwd, path) }).catch((err) =>
+      notify(`open failed: ${err}`),
+    );
   }
 
   function clearBlocks() {
@@ -591,6 +865,8 @@
   }
 
   function dropBlocks() {
+    // The focused block is about to stop existing.
+    focusedId = null;
     markers.forEach((m) => m.dispose());
     markers.clear();
     blocks.length = 1;
@@ -617,15 +893,26 @@
       items: [
         "help — this list. Also /help",
         "clear — clear rendered output, keeping the banner. Also cls, /clear",
+        "open <path> — open a file or folder in whatever the system opens it with",
       ],
     },
     { kind: "heading", level: 2, text: "Keys", tone: null },
     {
       kind: "list",
       items: [
-        "Tab — list what this folder offers for the word being typed",
-        "Up / Down — pick a suggestion, Enter accepts it",
-        "Esc — dismiss a suggestion, or open and close settings",
+        "Up / Down — move through the matches shown above the input",
+        "Tab or Right arrow — take the selected match. Enter always runs the line",
+        "Up / Down at an empty prompt — the shell's own history, untouched",
+        ".. completes like any folder, so cd .. is one Tab away",
+        "Ctrl + B — show the current folder in a panel on the right, as a tree",
+        "Click a folder in the panel, or its arrow, to open it. Shift + click puts `cd` at the prompt",
+        ".. at the top of the panel goes up a folder, the same way",
+        "Click a file in the panel for the same options a file dropped on the window gets",
+        "Drag a file out of the panel into any other app to open it there. It is never moved",
+        "Ctrl + Up / Down — select a past command block, or click one",
+        "Ctrl + Shift + C — copy the selected block, Ctrl + Shift + M as markdown",
+        "Ctrl + C — stop the running command",
+        "Esc — dismiss a suggestion, deselect a block, or open and close settings",
         "F2 — capture a screenshot",
         "F3 — toggle the debug overlay",
         "Right-click a block — copy its output",
@@ -663,6 +950,9 @@
     if (last && !last.closed) {
       last.closed = true;
       last.exitCode = exitCode;
+      // Nothing will ever read this block again, and the cache holds a copy of
+      // its text.
+      snapRead.delete(last.id);
     }
   }
 
@@ -707,16 +997,55 @@
   // on every keystroke, and reflow on resize. Appending raw bytes instead
   // reproduces all of that as literal garbage. The marker tracks the block's
   // first row as the buffer scrolls and trims.
-  function snapshot(block: Block) {
+  /**
+   * Where the last read of a block got to, so the next one resumes there.
+   *
+   * Re-reading every row of a block on every chunk is quadratic in the block's
+   * own length, and the constant is not small — a `translateToString` and a
+   * regex per row. `git --no-pager diff` is thousands of rows arriving over
+   * dozens of chunks, and that product is the whole reason it was slow. A raw
+   * terminal has nothing to re-read, which is why it does not pay this at all.
+   *
+   * Rows already passed cannot change **while output is being appended**, which
+   * is the only case this fast path is taken: a repaint (the buffer got shorter)
+   * and a reflow (a resize) both throw the cache away and re-read in full.
+   */
+  const snapRead = new Map<number, { fromY: number; y: number; text: string; glued: boolean; end: number }>();
+  /** Rows re-read on every pass regardless. See below. */
+  const SNAP_SLACK = 2;
+
+  // A block's text is read back out of xterm's screen buffer rather than
+  // accumulated from the raw stream. xterm has already applied every escape
+  // sequence — cursor moves, erase-line, the full-line redraw PSReadLine does
+  // on every keystroke, and reflow on resize. Appending raw bytes instead
+  // reproduces all of that as literal garbage. The marker tracks the block's
+  // first row as the buffer scrolls and trims.
+  function snapshot(block: Block, full = false) {
     if (block.id === rawBlockId) return;
     const marker = markers.get(block.id);
     if (!marker || marker.line < 0 || !term) return;
     const buf = term.buffer.active;
     const end = buf.baseY + buf.cursorY;
-    let out = "";
     const cols = term.cols;
-    let glued = false;
-    for (let y = marker.line; y <= end; y++) {
+
+    let from = snapRead.get(block.id);
+    // The marker moved (the buffer trimmed under us) or the block got shorter
+    // (a program is repainting its own screen) — either way nothing read so far
+    // can be trusted.
+    if (full || from?.fromY !== marker.line || end < from.end) from = undefined;
+
+    let y = from?.y ?? marker.line;
+    let out = from?.text ?? "";
+    let glued = from?.glued ?? false;
+    // Everything except the last couple of rows is committed. The join between
+    // two rows is decided by looking at the row *after* them, and the row after
+    // the last one is still being written — so the tail is re-read every pass
+    // and only what sits behind it is kept.
+    const commitY = Math.max(marker.line, end - SNAP_SLACK);
+    let keep = { fromY: marker.line, y, text: out, glued, end };
+
+    for (; y <= end; y++) {
+      if (y === commitY) keep = { fromY: marker.line, y, text: out, glued, end };
       if (!buf.getLine(y)) continue;
       const row = rowText(y);
       out += row;
@@ -725,15 +1054,75 @@
       glued = splitWord(row, rowText(y + 1), cols, glued);
       if (!buf.getLine(y + 1)?.isWrapped && !glued) out += "\n";
     }
+    keep.end = end;
+    snapRead.set(block.id, keep);
     // The block starts on the prompt row, so its first logical line is the
     // echoed command — already captured in `block.command`, drop it here.
     block.buffer = out.split("\n").slice(block.command ? 1 : 0).join("\n").replace(/\s+$/, "");
   }
 
+  /**
+   * How long the stream has to be quiet before the block renderer takes the
+   * buffer's structure, and the longest it may be held back regardless.
+   *
+   * A chunk boundary is an artefact of the pipe, not of the text, and parsing
+   * on every one of them renders structure the output does not have yet. The
+   * quiet window waits for the program to finish its thought; the cap is what
+   * keeps a command that never stops talking (`ping -t`, a build) flowing
+   * instead of never rendering at all. Both are under a fifth of a second — the
+   * output is not being delayed so much as it is being allowed to arrive.
+   */
+  const SHOW_QUIET = 80;
+  const SHOW_MAX = 240;
+  /**
+   * The same cap for a block that has nothing on screen yet, and much longer.
+   *
+   * The cap is a compromise for output that keeps coming; the *first* paint is
+   * not the same problem. Half a block appearing and the rest arriving after it
+   * is the thing that reads as broken, and it is worth waiting for — until this
+   * long, a block shows nothing rather than showing part of itself. The loading
+   * bar is what covers the wait, so the reader is never looking at an empty box
+   * wondering whether anything is happening.
+   *
+   * A second and a half rather than a fraction of one, because most commands
+   * finish inside it: `npm --help` writes its output over several ConPTY reads
+   * with gaps of their own, so a shorter hold caught it mid-dump and painted
+   * half a block. Anything still running past this is a *streaming* command,
+   * and streaming is the case the cap is for.
+   */
+  const SHOW_FIRST_MAX = 1500;
+  let showTimer: ReturnType<typeof setTimeout> | undefined;
+  let showHeldSince = 0;
+
+  /** Take the buffer's structure now. Used when there is provably no more coming. */
+  function showNow(block: Block) {
+    clearTimeout(showTimer);
+    showTimer = undefined;
+    showHeldSince = 0;
+    if (block.shown === block.buffer) return;
+    block.shown = block.buffer;
+    queueReveal();
+  }
+
+  // One timer, not one per block: only the last block is ever open.
+  function showSoon(block: Block) {
+    const now = performance.now();
+    showHeldSince ||= now;
+    if (now - showHeldSince >= (block.shown ? SHOW_MAX : SHOW_FIRST_MAX)) {
+      showNow(block);
+      return;
+    }
+    clearTimeout(showTimer);
+    showTimer = setTimeout(() => showNow(block), SHOW_QUIET);
+  }
+
   // Scrolling is motion, so it goes through GSAP like everything else (see
   // ANIMATION.md) — a bare scrollTop assignment teleports.
   const mm = gsap.matchMedia();
-  let reduceMotion = false;
+  // `$state`, not a plain `let`: it is handed to the settings overlay as a prop
+  // now, and a plain `let` read in a template compiles to a constant read — the
+  // worst bug this codebase has had. The media query can flip mid-session.
+  let reduceMotion = $state(false);
   mm.add("(prefers-reduced-motion: reduce)", () => {
     reduceMotion = true;
     return () => (reduceMotion = false);
@@ -793,12 +1182,24 @@
   //   switch — the mode was toggled. Move in *either* direction: going back to
   //            "stay on top" means going up to the latest command, which is
   //            the whole point of choosing it.
-  type SyncIntent = "grow" | "open" | "switch";
+  /**
+   * `shrink` is a block that got *shorter*, which only a program redrawing its
+   * own screen does — a pager swapping pages, or any full-screen repaint. It is
+   * its own intent because the other three all assume content only ever grows,
+   * and on a shrink that assumption fails in both modes at once: the view is
+   * left past the end of a document that no longer reaches it, and the browser
+   * clamps `scrollTop` to fix it. That clamp is the rearrangement — the layout
+   * moving on its own, with neither scroll mode having any say in it.
+   */
+  type SyncIntent = "grow" | "open" | "switch" | "shrink";
 
   function syncTail(node: HTMLElement, intent: SyncIntent = "grow") {
     if (!scrollEl || !spacerEl || !isLastBlock(node)) return;
     const anchor = intent !== "grow";
-    if (anchor) tailDetached = false;
+    // A shrink re-applies the mode's rule but does not *reset* the reader's
+    // position: scrolling up is how output that has passed gets read, and
+    // content redrawing itself under them is not a reason to take that away.
+    if (anchor && intent !== "shrink") tailDetached = false;
     // Growth moves every head below it, so the pinned set is stale by now.
     queueStuck();
     const view = scrollEl.clientHeight;
@@ -809,10 +1210,18 @@
       spacerEl.style.height = "0px";
       const target = scrollEl.scrollHeight - view;
       const distance = target - scrollEl.scrollTop;
-      if (distance <= 0) return;
       // Scrolling up is how output that already passed gets read; yanking the
       // view back down on the next chunk would make that impossible.
-      if (!anchor && tailDetached) return;
+      if (tailDetached && !anchor) return;
+      if (intent === "shrink") {
+        // The document just got shorter under the view. "Move down" means the
+        // tail, so follow it back up — hard, not tweened: the content it would
+        // animate across no longer exists, and a page swap fires this on every
+        // keypress. Detached readers are left alone above.
+        if (!tailDetached && distance < 0) scrollEl.scrollTop = target;
+        return;
+      }
+      if (distance <= 0) return;
       // A tween is already covering this ground. Re-targeting it every chunk
       // is what made the previous version stutter — let it land instead. But
       // the update cannot just be dropped: the last chunk of a command usually
@@ -843,6 +1252,10 @@
       return;
     }
 
+    // The reservation is what holds the head at ANCHOR_TOP when the block is
+    // shorter than the viewport, so it is recomputed on a shrink as well —
+    // without it a block that halved in height leaves the view scrolled past a
+    // document that no longer extends that far.
     spacerEl.style.height = `${Math.max(0, view * (1 - ANCHOR_TOP) - node.offsetHeight)}px`;
     if (!anchor) return;
 
@@ -855,7 +1268,11 @@
     if (intent === "open" && target <= scrollEl.scrollTop + 1) return;
     if (Math.abs(target - scrollEl.scrollTop) < 1) return;
     scrollTween?.kill();
-    if (reduceMotion) {
+    // A shrink is not a gesture, so it is not animated. The head is *already*
+    // where it belongs in this mode — the block's top has not moved, only its
+    // bottom — so this only ever runs to undo a clamp, and animating a
+    // correction draws the eye to the thing it exists to hide.
+    if (reduceMotion || intent === "shrink") {
       scrollEl.scrollTop = target;
       return;
     }
@@ -872,10 +1289,38 @@
   // fire after layout — reacting to the buffer string instead would compute
   // `offsetHeight` from the previous frame's DOM.
   let growth: ResizeObserver | undefined;
+  /**
+   * The height each observed block was last seen at. A `ResizeObserver` reports
+   * that a box changed, never which way — and the two directions want opposite
+   * things here, so the previous value has to be kept to tell them apart.
+   */
+  const blockHeight = new WeakMap<Element, number>();
 
   function anchorNewBlock(node: HTMLElement) {
     growth ??= new ResizeObserver((entries) => {
-      for (const e of entries) syncTail(e.target as HTMLElement);
+      for (const e of entries) {
+        const el = e.target as HTMLElement;
+        const height = el.offsetHeight;
+        const before = blockHeight.get(el) ?? 0;
+        blockHeight.set(el, height);
+        // The first-landing tween writes an inline height that starts *below*
+        // the natural one, so without this the box animating into its content
+        // reads as a program repainting its own screen: the block gets flagged
+        // `data-repaint` for good and loses the character wave for the rest of
+        // its life. An animation of ours is never evidence about the program.
+        if (el.hasAttribute("data-growing")) continue;
+        if (height >= before) {
+          syncTail(el, "grow");
+          continue;
+        }
+        // A block only gets shorter when a program is redrawing its own screen,
+        // and a redraw rewrites every element in it — so this also marks the
+        // block as one the reveal must not character-split. Set once and left:
+        // a program that has repainted will repaint again, and the attribute is
+        // read by the reveal pass rather than by anything with a lifetime.
+        el.setAttribute("data-repaint", "");
+        syncTail(el, "shrink");
+      }
     });
     growth.observe(node);
     // Next frame, not now: `spacerEl` is bound on an element that comes after
@@ -895,14 +1340,6 @@
   // or the setting appears to do nothing until the next command.
   function resyncTail() {
     syncLast("switch");
-  }
-
-  // The live prompt line is a *sibling* of the output modules, so it appearing
-  // grows the output container without resizing anything the observer watches
-  // — no sync fires. That is one line of height arriving after the last one,
-  // which is exactly the gap that kept "move down" short of the bottom.
-  function tailNudge(_node: HTMLElement) {
-    requestAnimationFrame(() => syncLast());
   }
 
   // Sticky command line, the same affordance an editor uses to keep the
@@ -1003,6 +1440,105 @@
     heads.add(node);
     return { destroy: () => heads.delete(node) };
   }
+
+  // #region Block focus ───────────────────────────────────────────────────────
+  // **One** notion of "the focused block", per phase-7-navigation.md. Keyboard
+  // navigation is what builds it, but it is not what it is for: fold/unfold
+  // (phase 8), the raw toggle and per-block export (phase 10) and copy all need
+  // to name a block, and each of them growing its own idea of which one is the
+  // version of this that quietly breaks the others.
+  //
+  // The hover ring is deliberately *not* this. It tracks a pointer, disappears
+  // the moment the pointer leaves, and never survives a scroll — it says where
+  // the mouse is, not what the next command acts on. Two states, two meanings,
+  // and only this one is ever read by a feature.
+
+  let focusedId = $state<number | null>(null);
+
+  function blockEl(id: number) {
+    return scrollEl?.querySelector<HTMLElement>(`section.block[data-id="${id}"]`) ?? undefined;
+  }
+
+  /** Ids in screen order. The banner is not a block and cannot be focused. */
+  function focusableIds() {
+    return blocks.filter((b) => b.md).map((b) => b.id);
+  }
+
+  /**
+   * Focus a block and bring it into view, anchored the same way a new block is
+   * — its head at `ANCHOR_TOP`, so the command that produced the output is the
+   * line the eye lands on.
+   */
+  function focusBlock(id: number) {
+    focusedId = id;
+    const node = blockEl(id);
+    if (!node || !scrollEl) return;
+    // A jump backwards is the reader deliberately leaving the tail, and is
+    // exactly the case `checkDetached` cannot see: it bails while a tween of
+    // ours is running, which this is.
+    tailDetached = !isLastBlock(node);
+    const view = scrollEl.clientHeight;
+    const target = Math.max(
+      0,
+      Math.min(node.offsetTop - view * ANCHOR_TOP, scrollEl.scrollHeight - view),
+    );
+    scrollTween?.kill();
+    if (reduceMotion || Math.abs(target - scrollEl.scrollTop) < 1) {
+      scrollEl.scrollTop = target;
+      queueStuck();
+      return;
+    }
+    scrollTween = gsap.to(scrollEl, {
+      duration: 0.3,
+      ease: "power2.out",
+      scrollTo: { y: target },
+      overwrite: true,
+      // The pinned-head set changes all the way through the travel, not only
+      // at the end — without this the sticky line lags a whole jump behind.
+      onUpdate: queueStuck,
+    });
+  }
+
+  /**
+   * Step the focus one block, newest-last. Past the newest block is the input
+   * bar: focus clears and the view returns to the tail, so Ctrl+Down out of the
+   * scrollback lands exactly where a fresh prompt does.
+   */
+  function moveFocus(delta: 1 | -1) {
+    const ids = focusableIds();
+    if (!ids.length) return;
+    if (focusedId === null) {
+      // Already at the input bar — there is nothing newer to move to.
+      if (delta > 0) return;
+      focusBlock(ids[ids.length - 1]);
+      return;
+    }
+    const at = ids.indexOf(focusedId);
+    // The focused block was cleared out from under the focus.
+    if (at < 0) return focusBlock(ids[ids.length - 1]);
+    const next = at + delta;
+    if (next >= ids.length) {
+      focusedId = null;
+      syncLast("switch");
+      return;
+    }
+    focusBlock(ids[Math.max(0, next)]);
+  }
+
+  /**
+   * Copy the focused block from the keyboard — the same two copies right-click
+   * offers, minus the pointer the lean gesture needs a direction from. The
+   * settle stands in for it: the block acknowledges the key rather than a toast
+   * being the only evidence anything happened.
+   */
+  function copyFocused(asMarkdown: boolean) {
+    const block = blocks.find((b) => b.id === focusedId);
+    if (!block) return notify("No block selected — ctrl+up selects one");
+    const node = blockEl(block.id);
+    if (node && !reduceMotion) settle(node, 0.985);
+    copyText(block, asMarkdown);
+  }
+  // #endregion ────────────────────────────────────────────────────────────────
 
   /**
    * Resolved value of a design token. The one place JS reads the token layer:
@@ -1116,171 +1652,356 @@
     });
   }
 
-  /**
-   * The stuttered entrance, ported from `Classified-Section.vue`. Position drags
-   * in on a jitter ease while opacity blinks up on a *different*, stepped one —
-   * the two not tracking each other is the entire effect. Retuned from the
-   * portfolio's `strength: 2.4, points: 24` over 0.7s: a section entrance there
-   * is a destination, a panel here is on the way to something.
-   *
-   * `randomize: true` so no two openings stutter identically, `clamp: true` so
-   * the jitter never overshoots past the resting position.
-   */
-  const GLITCH_IN =
-    "rough({ template: power2.out, strength: 1.6, points: 14, taper: out, randomize: true, clamp: true })";
-
-  /**
-   * How far below its resting place the panel starts, as a fraction of the
-   * viewport — a `dv` distance per ANIMATION.md, not a pixel constant.
-   *
-   * 6dvh rather than the 2dvh it was: the panel is centred now, so the travel
-   * has to read as coming *from* somewhere. At 2dvh a centred panel just
-   * appears with a twitch.
-   */
-  const PANEL_RISE = 0.06;
-
-  // Panel entrance at ANIMATION.md's settings timing (0.34s). The backdrop and
-  // the panel are two tweens over one gesture: the backdrop simply fades, the
-  // panel is the focal element and carries the glitch.
-  function panelIn(node: HTMLElement) {
-    const panel = node.querySelector(".settings");
-    gsap.from(node, { autoAlpha: 0, duration: reduceMotion ? 0.1 : 0.34, ease: "power3.out" });
-    // Rises into place rather than sliding in from the right. A lateral entry
-    // is the tell of a drawer, and this is not one — see decisions.md. The
-    // amplitude is a `dv` distance.
-    if (panel) {
-      const rise = PANEL_RISE * window.innerHeight;
-      if (reduceMotion) {
-        // Skipped, not shortened. Simulated malfunction is exactly the class of
-        // motion that reads as a real fault to someone who cannot filter it,
-        // and this is a terminal, where a real fault is plausible.
-        gsap.from(panel, { autoAlpha: 0, duration: 0.1 });
-      } else {
-        // Travel and opacity are deliberately two tweens with two eases and two
-        // durations. Putting them on one tween is the version of this effect
-        // that reads as a plain fade with a wobble.
-        gsap.from(panel, { y: rise, duration: 0.35, ease: GLITCH_IN });
-        gsap.from(panel, { autoAlpha: 0, duration: 0.28, ease: "steps(3)", delay: 0.05 });
-      }
-    }
-    return {
-      destroy() {
-        gsap.killTweensOf([node, panel]);
-      },
-    };
-  }
-
-  // #region Character flicker ─────────────────────────────────────────────────
-  // The portfolio's per-word glitch, spent where it does work. There is no idle
-  // glitch in this app: the original is an infinite CSS animation idle 97% of
-  // its cycle, which is a permanently non-idle compositor, and PERFORMANCE.md
-  // budgets idle CPU at literally zero. Fired once on a real state change it is
-  // the same look for none of the cost, and it lands on the one element whose
-  // job at that moment is to say *this changed*.
-
-  /** Roll per character. Floored at one, or a short label silently does nothing. */
-  const GLITCH_CHANCE = 0.1;
-
-  /**
-   * Flicker a toggle's own label. **Only ever call this on static text.** It
-   * rebuilds the element's children, which detaches any text node Svelte is
-   * holding a reference to — safe for these labels, which come from the frozen
-   * `FONT_MODES` / `SCROLL_MODES` tables and are written once at mount, and
-   * never safe for command output, which Svelte updates on every PTY chunk.
-   */
-  function glitchLabel(label: HTMLElement | null | undefined) {
-    if (!label || reduceMotion) return;
-    const text = label.textContent ?? "";
-    const chars = [...text];
-    if (!chars.length) return;
-
-    const picked = new Set<number>();
-    chars.forEach((_, i) => Math.random() < GLITCH_CHANCE && picked.add(i));
-    if (!picked.size) picked.add(Math.floor(Math.random() * chars.length));
-
-    label.textContent = "";
-    const spans: HTMLElement[] = [];
-    for (const [i, ch] of chars.entries()) {
-      if (!picked.has(i)) {
-        label.append(ch);
-        continue;
-      }
-      const span = document.createElement("span");
-      span.className = "glitch-char";
-      span.textContent = ch;
-      label.append(span);
-      spans.push(span);
-    }
-
-    // The RGB split rides on the class for the duration rather than being
-    // tweened: `text-shadow` interpolates as a string, and a stepped ease over a
-    // value GSAP cannot interpolate is a snap dressed up as an animation. The
-    // motion is the stepped `x`; the split is what it is stepping through.
-    gsap.to(spans, {
-      keyframes: [
-        { x: 2, duration: 0.06 },
-        { x: -1, duration: 0.06 },
-        { x: 0, duration: 0.06 },
-      ],
-      ease: "steps(1)",
-      stagger: 0.01,
-      // Tear the wrappers down on completion — same rule as reverting a split.
-      // The effect is over; the DOM cost is not.
-      onComplete: () => (label.textContent = text),
-    });
-  }
-
-  /**
-   * The label inside a settings row, which is what the flicker is played on.
-   * A switch row carries one label per side, so the caller says which one is
-   * about to become the current state — the flicker belongs on the value being
-   * moved *to*, and the class that marks it has not been applied yet at click
-   * time.
-   */
-  function optionLabel(button: EventTarget | null, index = 0) {
-    const labels = (button as HTMLElement | null)?.querySelectorAll<HTMLElement>(
-      ".settings-option-label",
-    );
-    return labels?.[index] ?? null;
-  }
-  // #endregion ────────────────────────────────────────────────────────────────
-
   // Svelte tears an `{#if}` block out the instant the flag flips, so an exit
   // tween started from the click handler would animate a node that is already
-  // gone. The tween owns the flag instead: it clears `settingsOpen` when it
-  // lands. Every close path goes through here — there is no other way to shut
+  // gone. The overlay plays its own exit and hands the flag back here when it
+  // lands. Every close path goes through this — there is no other way to shut
   // the panel, by design.
   function closeSettings() {
-    const panel = settingsBackdrop?.querySelector(".settings");
-    if (!settingsBackdrop || !panel) {
+    const landed = () => {
       settingsOpen = false;
-      return;
-    }
-    gsap.killTweensOf([settingsBackdrop, panel]);
-    // Faster than the entrance and eased *in*, so it accelerates away. The
-    // panel is losing focus, so it gets no overshoot — see ANIMATION.md.
-    //
-    // It leaves *upward*, against the direction it arrived from. Enter and
-    // leave being a mirror pair here is what stops the panel reading as
-    // dropping back into a drawer it never came out of.
-    gsap.to(panel, { autoAlpha: 0, y: -PANEL_RISE * window.innerHeight, duration: 0.2, ease: "power2.in" });
-    gsap.to(settingsBackdrop, {
-      autoAlpha: 0,
-      duration: 0.2,
-      ease: "power2.in",
-      onComplete: () => {
-        settingsOpen = false;
-        // The panel took focus from xterm when it opened, and xterm is the
-        // input engine — without this the user is typing into nothing.
-        refocus();
-      },
-    });
+      // The panel took focus from xterm when it opened, and xterm is the
+      // input engine — without this the user is typing into nothing.
+      refocus();
+    };
+    if (settingsPanel) settingsPanel.close(landed);
+    else landed();
   }
 
   function toggleSettings() {
     if (settingsOpen) closeSettings();
     else settingsOpen = true;
   }
+
+  // #region ── the cwd panel ──────────────────────────────────────────────────
+  //
+  // The one surface in this app that is not laid *over* the terminal. It takes
+  // width away from the scrollback and the input bar instead, because a file
+  // list is something you read alongside a command rather than instead of one —
+  // an overlay would have to be dismissed before the command it was consulted
+  // for could be typed, which is the whole reason a drawer was ruled out for
+  // settings and the reason one is right here.
+  //
+  // It stays a floating surface within that band: inset on all four sides, its
+  // own border and shadow, not welded to the window frame.
+  let panelOpen = $state(false);
+  let panelEl: HTMLElement | undefined = $state();
+
+  // The tree, as one flat map keyed by the path *relative to the prompt's cwd*
+  // — `""` is the folder itself, `"src"` is one level in. Flat rather than
+  // nested nodes for the reason every tree ends up flat eventually: expanding a
+  // folder is then one assignment at a known key instead of a walk to find the
+  // node to mutate, and re-reading the whole tree on a new prompt is a loop
+  // over the keys that already exist.
+  //
+  // Relative, not absolute, because the panel's whole contract is that it has
+  // no location of its own — every path here is resolved against `promptCwd`
+  // at the moment it is used, so a `cd` moves the panel by definition rather
+  // than by an invalidation somebody has to remember to write.
+  let tree = $state<Record<string, { name: string; dir: boolean }[]>>({});
+  let expanded = $state<string[]>([]);
+
+  const panelSep = $derived(shellIsWindows() ? "\\" : "/");
+  function joinRel(rel: string, name: string) {
+    return rel ? rel + panelSep + name : name;
+  }
+
+  function loadDir(rel: string) {
+    const cwd = promptCwd;
+    if (!cwd) return;
+    invoke<{ name: string; dir: boolean }[]>("list_dir", {
+      path: resolveDir(cwd, rel),
+    })
+      // Directories first, then files, each alphabetical — the ordering every
+      // file browser has, and the same one `completions` already sorts by.
+      .then((entries) => {
+        // A listing that was asked for under a different cwd is answering a
+        // question nobody is asking any more: a `cd` fired between the request
+        // and the reply, and writing it now would put the old folder's contents
+        // back into a tree that has already been cleared for the new one.
+        if (promptCwd !== cwd) return;
+        tree[rel] = entries.sort(
+          (a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name),
+        );
+      })
+      .catch(() => {
+        if (promptCwd === cwd) tree[rel] = [];
+      });
+  }
+
+  // Listing follows the shell, never the panel. `dirVersion` is bumped by the
+  // same OSC 133;A handler that drops the completion cache, so every folder
+  // currently on screen — not just the root — is re-read once per prompt and
+  // picks up files a command just wrote.
+  //
+  // `expanded` is read through `untrack` on purpose: expanding a folder loads
+  // that one folder itself, and re-listing the other eight because the array
+  // changed is eight IPC round-trips to learn nothing.
+  //
+  // The reset for a new cwd is in this same effect rather than one of its own,
+  // and that is a correctness point, not tidiness: as two effects the loads for
+  // the *old* cwd were already in flight when the reset cleared the tree, and
+  // they landed a moment later and put the old folder back on screen.
+  let panelCwd = "";
+  $effect(() => {
+    const cwd = promptCwd;
+    dirVersion;
+    if (!panelOpen || !cwd) return;
+    untrack(() => {
+      // A different cwd is a different tree. Dropping it rather than merging is
+      // the point: a folder called `src` in the new directory is not the `src`
+      // that was expanded in the old one, and keeping the expansion open would
+      // silently claim it was.
+      if (cwd !== panelCwd) {
+        panelCwd = cwd;
+        expanded = [];
+        tree = {};
+      }
+      for (const rel of ["", ...expanded]) loadDir(rel);
+    });
+  });
+
+  function toggleDir(rel: string) {
+    if (expanded.includes(rel)) {
+      // Descendants go with it. Collapsing and re-expanding then re-reads,
+      // which is what makes a stale subtree impossible to keep on screen.
+      expanded = expanded.filter((p) => p !== rel && !p.startsWith(rel + panelSep));
+      return;
+    }
+    expanded = [...expanded, rel];
+    loadDir(rel);
+  }
+
+  /**
+   * The band the panel occupies, as a fraction of `--panel-w`, and the one
+   * tween that moves it.
+   *
+   * ANIMATION.md bans animating width and padding, and this is the sanctioned
+   * exception the user asked for by name: the terminal's own frame never moves,
+   * so the only way the output and input containers can arrive at their new
+   * width is for that width to be animated. The ban's real target is a tween
+   * whose *only* option was a layout property — this one has no other option,
+   * because the thing being animated is a layout fact.
+   *
+   * **One tween drives both sides**, and that is not a tidiness point. The
+   * panel's left edge and the terminal's right edge have to stay welded
+   * together or the gesture reads as two objects that happen to be moving at
+   * the same time. Two tweens with matching numbers agree only until someone
+   * retunes one of them; one tween cannot disagree with itself — the same rule
+   * the handoff's `--gap` is written under.
+   */
+  let appEl: HTMLElement | undefined = $state();
+  const band = { p: 0 };
+  let bandTween: gsap.core.Tween | undefined;
+  // Read by the resize observer. A layout property tweening per frame is
+  // exactly the thing that observer is watching for, and its callback is not
+  // cheap — see `syncBand`.
+  let bandMoving = false;
+  let syncBand: () => void = () => {};
+
+  function writeBand(node: HTMLElement | undefined) {
+    // A multiplier on the custom property rather than a pixel figure, so the
+    // width stays the `clamp()` the stylesheet owns and this code never has to
+    // know what it resolved to.
+    appEl?.style.setProperty("--panel-open-w", `calc(var(--panel-w) * ${band.p})`);
+    if (node) gsap.set(node, { x: (1 - band.p) * (node.offsetWidth + 12) });
+  }
+
+  function moveBand(node: HTMLElement, to: 0 | 1, onLanded: () => void) {
+    bandTween?.kill();
+    if (reduceMotion) {
+      // Skipped, not shortened: the band snaps and the panel gets the 0.1s
+      // opacity fade the reduced-motion table gives every panel slide.
+      band.p = to;
+      writeBand(undefined);
+      gsap.set(node, { x: 0 });
+      gsap.to(node, { autoAlpha: to, duration: 0.1, onComplete: onLanded });
+      syncBand();
+      return;
+    }
+    bandMoving = true;
+    bandTween = gsap.to(band, {
+      p: to,
+      // The chrome numbers: the settings panel's rise on the way in, its
+      // shorter accelerating leave on the way out.
+      duration: to ? 0.34 : 0.2,
+      ease: to ? "power3.out" : "power2.in",
+      onUpdate: () => writeBand(node),
+      onComplete: () => {
+        bandMoving = false;
+        writeBand(node);
+        syncBand();
+        onLanded();
+      },
+    });
+    gsap.to(node, { autoAlpha: to, duration: to ? 0.2 : 0.15, ease: "power2.out" });
+  }
+
+  /** The entrance. The panel pushes the terminal aside rather than arriving after it has moved. */
+  function panelSlide(node: HTMLElement) {
+    band.p = 0;
+    gsap.set(node, { autoAlpha: 0 });
+    writeBand(node);
+    moveBand(node, 1, () => {});
+  }
+
+  // Same rule as `closeSettings`: the tween owns the unmount, because Svelte
+  // tears the `{#if}` out the instant the flag flips.
+  function closePanel() {
+    if (!panelEl) {
+      panelOpen = false;
+      return;
+    }
+    moveBand(panelEl, 0, () => {
+      panelOpen = false;
+      refocus();
+    });
+  }
+
+  function togglePanel() {
+    if (panelOpen) closePanel();
+    else panelOpen = true;
+  }
+
+  /**
+   * Replace the whole prompt line with `text`.
+   *
+   * Backspaces clear everything left of the caret and Delete everything right
+   * of it, rather than assuming the caret is at the end. Two keys every line
+   * editor implements, so this stays true of a shell that is not PowerShell —
+   * Ctrl+U would have been one keystroke and is unbound in PSReadLine's Windows
+   * editmode, where it arrives as a literal `^U`.
+   */
+  function replaceLine(text: string) {
+    const right = Math.max(0, input.length - cursorCol);
+    invoke("pty_write", {
+      data: "\x7f".repeat(cursorCol) + "\x1b[3~".repeat(right) + text,
+    });
+    refocus();
+  }
+
+  /**
+   * Clicking an entry types at the prompt — it never runs anything. The panel is
+   * a second way to name a path, the same job the suggestion strip does, so it
+   * answers the same way: the shell owns the line, and what the user does with
+   * the name is theirs. A panel that ran `cd` on a click would be a second
+   * command source with no block behind it.
+   *
+   * Three gestures, and the split follows what each kind of thing is for:
+   *
+   * - **A folder** opens in place. Looking inside a folder is the thing a tree
+   *   is for, and it is the one action here that does not touch the shell at
+   *   all — so it is the bare click, and the twisty is the same action with a
+   *   target you can hit without reading the name.
+   * - **Shift and a folder** replaces the line with `cd <path>`. Replaces, not
+   *   appends: the caret is usually sitting in the middle of something else,
+   *   and a `cd` spliced into a half-typed command is a line nobody asked for.
+   *   It is still not run — the same rule as everything else here.
+   * - **A file** goes through the same path a file dropped on the window does:
+   *   the strip comes up with how to run it, most likely runner first —
+   *   `bash script.sh`, `python x.py`, `& thing.exe` — with the bare path and a
+   *   `cd` at the bottom. This is deliberately not a second answer to a
+   *   question already answered: a click in the panel and a drag from Explorer
+   *   are the same event with a different source, and a file explorer built
+   *   into a terminal is exactly the thing that must not disagree with itself
+   *   about what a file is for. `runOptions` is where the table lives.
+   *
+   * Shift on a file does the same as a plain click — `cd` to a file is not a
+   * command, so there is no second gesture to give it.
+   */
+  function panelPick(e: MouseEvent, entry: { name: string; dir: boolean }, rel: string) {
+    if (dragTook) {
+      dragTook = false;
+      return;
+    }
+    if (entry.dir && !e.shiftKey) {
+      toggleDir(rel);
+      return;
+    }
+    if (entry.dir) replaceLine(`cd ${quotePath(rel, shellIsWindows())}`);
+    else dropPaths([resolveDir(promptCwd, rel)]);
+  }
+
+  /**
+   * The drag preview, as a base64 PNG — which is the one form the plugin takes
+   * that is not a path to a file on disk. Drawn rather than shipped as an
+   * asset: it is a rounded accent square, so it costs no binary in the repo and
+   * no resource to resolve at runtime, which on Linux is a real saving because
+   * a bundled asset's path is a different answer per package format.
+   *
+   * Built once. It never changes, and a canvas per drag is a canvas per drag.
+   */
+  let dragIcon = "";
+  function dragPreview() {
+    if (dragIcon) return dragIcon;
+    const size = 44;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return "";
+    ctx.fillStyle =
+      getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#7e55dd";
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    ctx.roundRect(2, 2, size - 4, size - 4, 8);
+    ctx.fill();
+    dragIcon = canvas.toDataURL("image/png");
+    return dragIcon;
+  }
+
+  /**
+   * Dragging a row out of the window.
+   *
+   * **This is a real OS drag, not an HTML5 one, and it had to be.** A webview
+   * drag carries `text/plain`; every other application wants a file, so Paint
+   * and Aseprite showed the stop cursor and there was no `DataTransfer` tuning
+   * that would have changed it — a WebView2 drag cannot be promoted into a
+   * shell file drag. `tauri-plugin-drag` starts the platform's own: OLE on
+   * Windows, `file://` URIs through GTK on Linux.
+   *
+   * **`mode: "copy"`, never `"move"`.** Those are the only two the native API
+   * has — `link` does not exist down here, which is a correction to what the
+   * HTML5 version claimed. Copy is the read-only one: the target reads the file
+   * and the source is untouched. `move` asks the target to take the file *and
+   * the source to delete it*, which is the one thing this panel must never be
+   * able to do.
+   *
+   * Started from a pointer move rather than `dragstart`: the webview's own drag
+   * events are what Tauri's OS-level file-drop handler displaces, and that
+   * handler is what makes dragging a file *in* from the file manager work. So
+   * the gesture is measured here — past `DRAG_SLOP` with the button down is a
+   * drag, anything less is the click that opens the run options.
+   */
+  const DRAG_SLOP = 5;
+  /**
+   * Set when a drag takes over, and spent by the click that follows it.
+   * The native drag grabs the pointer, but the button still goes up over the
+   * row it went down on — so without this, dragging a file into Paint would
+   * also leave the run-options strip up behind it.
+   */
+  let dragTook = false;
+  function panelDragStart(e: PointerEvent, rel: string) {
+    if (e.button !== 0) return;
+    const from = { x: e.clientX, y: e.clientY };
+    const path = resolveDir(promptCwd, rel);
+    const move = (ev: PointerEvent) => {
+      if (Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < DRAG_SLOP) return;
+      done();
+      dragTook = true;
+      startDrag({ item: [path], icon: dragPreview(), mode: "copy" }).catch((err) =>
+        notify(`drag failed: ${err}`),
+      );
+    };
+    const done = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", done);
+      window.removeEventListener("pointercancel", done);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", done);
+    window.addEventListener("pointercancel", done);
+  }
+  // #endregion ────────────────────────────────────────────────────────────────
 
   /**
    * The one Esc handler. Raw mode is exempt — Esc is how you leave vim's insert
@@ -1294,6 +2015,12 @@
     // one", not "open the settings" — dismissing it must not also cost a panel.
     if (menuOpen) {
       closeMenu();
+      return;
+    }
+    // Same rule one layer out: a selected block is a state the user is in, and
+    // Esc is how any state is left before it is how a panel is opened.
+    if (focusedId !== null) {
+      focusedId = null;
       return;
     }
     toggleSettings();
@@ -1407,6 +2134,10 @@
   /** Set by beat 1, claimed by the next block to mount. */
   let handoffPending = false;
   let handoffAt = 0;
+  /** The frozen copy of the command being wiped, if a gesture is in flight. */
+  let handoffWipe: HTMLElement | undefined;
+  /** Undoes the clips the gesture wrote into the live prompt. */
+  let handoffRestore: (() => void) | undefined;
 
   /**
    * End the gesture now. `progress(1)` renders every part to its final state
@@ -1418,6 +2149,14 @@
     handoffParts.forEach((part) => part.progress(1).kill());
     handoffParts = [];
     handoffPending = false;
+    // `progress(1)` runs the timeline's `onComplete`, which does both of these
+    // — but only for a timeline that got as far as being built. A gesture
+    // killed before that leaves the copy sitting over the bar and, far worse,
+    // leaves the prompt clipped to nothing.
+    handoffWipe?.remove();
+    handoffWipe = undefined;
+    handoffRestore?.();
+    handoffRestore = undefined;
     releaseReveal();
   }
 
@@ -1450,16 +2189,120 @@
     const mark = inputBarEl.querySelector(".ghost-mark");
     const text = inputBarEl.querySelector(".input-text");
     if (!mark || !text) return;
-    const dx = Math.max(0, text.getBoundingClientRect().right - mark.getBoundingClientRect().right);
+    const bar = inputBarEl.getBoundingClientRect();
+    const rect = text.getBoundingClientRect();
+    const markRight = mark.getBoundingClientRect().right;
+    // The ghost completion sits inside this box and is not part of what is
+    // being handed over — it was never typed. `atPrompt` has already gone false
+    // by the time this runs, so Svelte will drop it, but not until it flushes,
+    // which is after every measurement here. Without this the mark travels past
+    // the end of the command to erase a suggestion nobody committed.
+    const ghostW = inputBarEl.querySelector(".ghost-suggest")?.getBoundingClientRect().width ?? 0;
+    const textW = rect.width - ghostW;
+    const dx = Math.max(0, rect.right - ghostW - markRight);
+    const cwd = inputBarEl.querySelector<HTMLElement>(".cwd-text");
+    const sep = inputBarEl.querySelector<HTMLElement>(".block-sep");
 
-    const tl = gsap.timeline({ onComplete: () => gsap.set(mark, { clearProps: "x,scale" }) });
-    // Beat 1 — focal. The mark runs to the end of the command; where it stops
-    // is where the block's border starts drawing from.
-    tl.to(mark, { x: dx, duration: 0.16, ease: "power2.inOut" }, 0);
+    // **A frozen copy of the command, wiped as the mark passes over it.**
+    //
+    // A copy and not the live element: `input` is cleared in the same handler
+    // that starts this, so the real text is gone a frame later — and even if it
+    // were not, animating a clip on DOM Svelte re-renders is the hazard
+    // QUIRKS §8 is about. The clone is ours, is inside the bar so the scoped
+    // styles still reach it, and is torn down on every path out of the gesture.
+    const wipe = text.cloneNode(true) as HTMLElement;
+    wipe.querySelector(".caret")?.remove();
+    // Same reason as the caret: it is in this box but it is not the command.
+    wipe.querySelector(".ghost-suggest")?.remove();
+    Object.assign(wipe.style, {
+      position: "absolute",
+      left: `${rect.left - bar.left}px`,
+      top: `${rect.top - bar.top}px`,
+      width: `${textW}px`,
+      pointerEvents: "none",
+    });
+    inputBarEl.append(wipe);
+    handoffWipe = wipe;
+
+    // Everything the mark passes over, clipped from the left by however far it
+    // has got. The path and the separator are the *live* elements: a clip is a
+    // style on the element, not a rewrite of its contents, so a re-render drops
+    // it harmlessly — the same reason the reveal's bars are allowed to write one.
+    // Only the command is a copy, because only the command is about to be
+    // cleared out from under us.
+    const erasable = [cwd, sep].filter((el): el is HTMLElement => !!el);
+    const boxes = erasable.map((el) => ({ el, box: el.getBoundingClientRect() }));
+    let carrying = true;
+
+    function paint() {
+      const x = gsap.getProperty(mark, "x") as number;
+      const edge = markRight + x;
+      for (const { el, box } of boxes) {
+        const cut = Math.min(box.width, Math.max(0, edge - box.left));
+        el.style.clipPath = `inset(0 0 0 ${cut}px)`;
+      }
+      // The command only ever goes away — it is not coming back, it is in the
+      // block now. The path and the separator belong to the prompt and are
+      // written back as the mark retreats over them.
+      if (carrying) {
+        const cut = Math.min(textW, Math.max(0, edge - rect.left));
+        wipe.style.clipPath = `inset(0 0 0 ${cut}px)`;
+      }
+      // The caret travels with the mark, by the mark's own displacement — it is
+      // the thing that says where typing goes, and typing goes where the mark
+      // is. It comes back on the return beat for free, since it is reading the
+      // same number.
+      if (caretEl) {
+        // Clearing the input fires the caret's own catch-up bounce in the same
+        // frame this starts. For the length of the gesture the caret belongs to
+        // the gesture, so that tween is taken off it rather than fought.
+        gsap.killTweensOf(caretEl, "x");
+        gsap.set(caretEl, { x });
+      }
+    }
+
+    function restore() {
+      for (const { el } of boxes) el.style.removeProperty("clip-path");
+      if (caretEl) gsap.set(caretEl, { clearProps: "x" });
+    }
+
+    const tl = gsap.timeline({
+      onComplete: () => {
+        gsap.set(mark, { clearProps: "x,scale" });
+        restore();
+        wipe.remove();
+        if (handoffWipe === wipe) handoffWipe = undefined;
+      },
+    });
+    handoffRestore = restore;
+    // Beat 1 — focal. The mark runs to the end of the command, taking the
+    // command with it: the clip is driven off the mark's own position each
+    // frame rather than off a matching ease, so the text disappears exactly
+    // under the glyph and not near it. This is what the travel is *for* — it
+    // used to be a mark sliding over text that had already vanished, which is
+    // why it read as too fast to follow. Where it stops is where the block's
+    // border starts drawing from.
+    tl.to(
+      mark,
+      {
+        x: dx,
+        duration: 0.26,
+        ease: "power2.inOut",
+        onUpdate: paint,
+        onComplete: () => {
+          // Past this point the command is gone for good, so the copy stops
+          // being painted and comes out of the document.
+          carrying = false;
+          wipe.remove();
+        },
+      },
+      0,
+    );
     // Meanwhile the source returns to rest, under the border draw rather than
-    // after it. Peripheral: it is the thing being left behind.
-    tl.to(mark, { x: 0, duration: 0.14, ease: "power2.in" }, 0.2);
-    settle(mark, 0.9, { tl, at: 0.34 });
+    // after it. Peripheral: it is the thing being left behind — and it writes
+    // the prompt back as it goes, so the bar is ready by the time it lands.
+    tl.to(mark, { x: 0, duration: 0.12, ease: "power2.in", onUpdate: paint }, 0.3);
+    settle(mark, 0.9, { tl, at: 0.42 });
     handoffParts.push(tl);
   }
 
@@ -1513,8 +2356,7 @@
         // Written from a proxy in `onUpdate` rather than tweened as a
         // `clip-path` string: one number drives both the clip and the position
         // of the two glowing tips, so the bright head cannot drift off the edge
-        // it is supposed to be the end of. Same reason `reveal.js` writes its
-        // staircase by hand.
+        // it is supposed to be the end of.
         const draw = { p: 0 };
         tl.to(
           draw,
@@ -1597,84 +2439,42 @@
   // #endregion ────────────────────────────────────────────────────────────────
 
   // #region Reveal ────────────────────────────────────────────────────────────
-  // Two animations and one rule for choosing between them.
+  // **One reveal, for everything.** The label bars sweep the coloured tokens in
+  // tier order and the character wave rises under the grey prose between them —
+  // whether the text arrived finished or is landing chunk by chunk right now.
   //
-  //   typewriter — for the one element that can still grow. See below.
-  //   static     — for everything else: the label reveal over the coloured
-  //                tokens, the character wave under the grey prose. See
-  //                `revealStatic`.
+  // What used to be here was a second animation: a `clip-path` staircase that
+  // typed the still-growing element row by row, with the bars and the wave
+  // reserved for text that was already final. It was removed rather than
+  // retuned. The output of one command looked like two different products
+  // depending on where a PTY chunk boundary happened to fall, and the boundary
+  // is an artefact of the pipe, not a fact about the text. A reader has no way
+  // to know why one line typed itself and the line under it swept in on bars,
+  // because there is no why.
   //
-  // The rule is `awaitingBlock`: everything inside a block still waiting on its
-  // command types itself, everything in a block that has already returned does
-  // not. Nothing is decided at mount — at mount nothing has arrived, so nothing
-  // is known.
+  // What replaces the typewriter's honesty about liveness is *when* the reveal
+  // plays. An element animates as its content lands, so the output still arrives
+  // in the order the program wrote it — the timeline is the shell's. It is the
+  // same gesture everywhere; only its moment is live.
   //
-  // ── The typewriter ──────────────────────────────────────────────────────────
-  // Output arrives one *rendered row* at a time — a visual line as the browser
-  // laid it out, so a logical line that wraps across three rows produces three
-  // reveals — each wiped left to right and quantized to a character grid, which
-  // is what makes a smooth wipe read as typing.
+  // ── The one thing this costs ────────────────────────────────────────────────
+  // The character wave splits real DOM, and Svelte re-renders an output element
+  // from the parser on every chunk — the `SplitText` hazard that shaped this
+  // whole region. Splitting an element that is about to be re-rendered hands its
+  // text nodes to a render that will discard them: the element freezes at what
+  // it held when the split ran, or the animation tears halfway through.
   //
-  // **This deviates from ANIMATION.md's prescribed mechanism, deliberately.**
-  // That file specifies `SplitText` with `type: "lines"`. SplitText works by
-  // replacing an element's `innerHTML` with one wrapper per row, and `revert()`
-  // restores a saved HTML *string* — which detaches every text node Svelte is
-  // holding a reference to. Output elements are re-rendered from the parser on
-  // every PTY chunk, so the first reveal of a still-streaming element would be
-  // the last update that element ever received: the block would freeze at
-  // whatever text it happened to hold when the split ran, while the shell went
-  // on producing output nobody could see. That is a lifecycle conflict, not a
-  // tuning problem, and it only appears on streaming content — which is all of
-  // this app's content.
+  // So **elements inside a block that is still awaiting its command do not get
+  // split.** They reveal on the same beat as everything else — bars over their
+  // tokens, and the prose rising as one piece instead of character by character,
+  // which is the resolution the wave already falls back to for a code block.
+  // Nothing is ever held back and nothing is revealed twice.
   //
-  // So the reveal is a `clip-path` staircase written on the element itself:
-  // rows above the cursor fully visible, the cursor's row wiped to a character
-  // boundary, rows below it clipped away. Nothing in the DOM is touched, which
-  // means there is nothing to revert and nothing to leak — ANIMATION.md's
-  // "revert splits after reveal" guard stops being a requirement rather than
-  // going unmet. It is also one tween per element instead of one per row, with
-  // the 0.12s row cadence expressed as the tween's duration.
-  //
-  // Two properties this depends on, both easy to break:
-  //
-  //  - **The clip is permanent while the element can still grow**, not applied
-  //    for a tween and cleared after. Cleared, the next chunk's text is on
-  //    screen for the frame between Svelte writing it and this pass running —
-  //    text appearing at full strength, vanishing, then typing itself in. It is
-  //    also why the hide happens in the action rather than in the pass: an
-  //    action runs during Svelte's mount flush, before the first paint.
-  //  - **The reveal never targets an element carrying chrome.** A code block's
-  //    box, its background and its border are already there and stay there;
-  //    only the text inside it types. Clipping the container would animate the
-  //    box in, which is a different (and wrong) statement about what happened.
-  //
-  // What is preserved exactly: the row is the unit, the wipe is a `clipPath`
-  // and never a slide, and the wipe is stepped rather than smooth.
-  //
-  // ── The unit is the block, not the row ──────────────────────────────────────
-  // The cursor still walks rows — that is the mechanism, and a wrapped logical
-  // line still produces one wipe per visual row. What changed is the *pacing*:
-  // the whole element is typed in one short burst, and the stagger the eye reads
-  // is between one element and the next rather than between two rows of the same
-  // one.
-  //
-  // Reading-paced rows (0.096s each) were right when exactly one element typed
-  // and everything above it was already final. Everything inside a block that is
-  // still awaiting a response now types, so a per-row pace would put a block of
-  // eight lines four times behind the shell that wrote it. A block is a thought;
-  // the beat belongs between thoughts.
-  //
-  // One element types at a time, in document order, and the next starts when the
-  // one before it lands — so an element never begins mid-way down a block whose
-  // earlier lines are still being written.
-
-  /** Per row while a block types. Fast — the row is no longer the beat. */
-  const TYPE_ROW = 0.028;
-  /** Floor and ceiling on one block's burst, whatever its row count. */
-  const TYPE_MIN = 0.12;
-  const TYPE_MAX = 0.26;
-  /** Past this many rows pending, reveal instantly — see flood control below. */
-  const FLOOD_ROWS = 40;
+  // An earlier attempt held only the *last* element of the open block, on the
+  // theory that it was the only one that could still change. A pager disproves
+  // it: `less` repaints the entire screen on every keypress, so every element in
+  // that block is rewritten each time. Holding one of them showed nothing at all
+  // when the block had only one, and splitting the rest tore them mid-flight.
   /**
    * The bar's two legs, from `miscLabelReveal.ts` in the portfolio. Retuned to
    * roughly two-thirds of its 0.42s/0.5s, per the same rule the glitch was
@@ -1742,105 +2542,20 @@
     revealFrame ||= requestAnimationFrame(runReveals);
   }
 
-  /**
-   * Row geometry for one element, measured fresh — the wrap it has *now*, at
-   * the width it has *now*. Rows are visual rows, so the same text at half the
-   * width is twice as many of them and gets twice as many reveals.
-   *
-   * The row band is the real height divided by the row count, not the computed
-   * `line-height`. The two are the same number for uniform text, and where
-   * they are not — a list with per-item spacing — dividing the real height is
-   * what guarantees the last row's bottom edge lands on the element's bottom
-   * edge. That is load-bearing: the resting clip below sits at exactly that
-   * edge, and a band even a pixel short would clip the final row forever.
-   */
-  function metricsOf(node: HTMLElement) {
-    const style = getComputedStyle(node);
-    const size = parseFloat(style.fontSize);
-    const line = parseFloat(style.lineHeight) || size * 1.5;
-    const height = node.scrollHeight;
-    const rows = Math.max(1, Math.round(height / line));
-    // Character cells across the element — how finely the wipe is quantized.
-    // Approximate on a proportional font by design: a cell too many or too few
-    // is invisible. Floored so a narrow element still steps rather than sliding.
-    const cells = Math.max(8, Math.round(node.clientWidth / (size * 0.6)));
-    return { rows, row: height / rows, cells };
-  }
 
-  /**
-   * Park an element at `count` revealed rows: everything above visible,
-   * everything below clipped away.
-   *
-   * **The clip persists between chunks.** It is not applied for the duration of
-   * a tween and cleared afterwards — cleared, the next chunk's text is on
-   * screen for the frame between Svelte writing it and the reveal pass running,
-   * which is the flash this whole design exists to avoid. An element only stops
-   * being clipped when it can no longer grow.
-   */
-  function rest(node: HTMLElement, count: number, m = metricsOf(node)) {
-    node.style.clipPath = revealClip(count, m.row, m.cells);
-  }
-
-  /** Nothing more can arrive in this element, so nothing more may be hidden. */
+  /** Clears a label's hide. The reveal sets it; nothing else may leave one on. */
   function unclip(node: HTMLElement) {
     node.style.clipPath = "";
   }
 
   /**
    * Drops the action's pre-paint hide. Called only once the reveal's own hiding
-   * is in place — the clip for the typewriter, the per-character `autoAlpha` and
-   * the label clips for the static reveal. Called any earlier and the whole
-   * element is briefly on screen at full strength, which is the flash both
-   * reveals exist to avoid.
+   * is in place — the per-character `autoAlpha` and the label clips. Called any
+   * earlier and the whole element is briefly on screen at full strength, which
+   * is the flash the reveal exists to avoid.
    */
   function show(node: HTMLElement) {
     node.style.visibility = "";
-  }
-
-  /**
-   * The typing indicator — the input bar's caret, riding the wipe's leading
-   * edge.
-   *
-   * The typewriter is a picture of a program writing, and until now the only
-   * evidence of the writer was the text arriving. The caret is the same object
-   * the user was just typing into: the bar hands its cursor to the block, the
-   * block writes with it, and it goes out when the block is done.
-   *
-   * It lives in the bars overlay for the same two reasons the bars do — Svelte
-   * rewrites an output element's children on every chunk, and a clip on the
-   * element applies to anything inside it, so a caret in there would be wiped
-   * by the very wipe it is supposed to be leading.
-   */
-  let typeCaret: HTMLElement | undefined;
-
-  /**
-   * An element's top-left corner in the scroll container's own coordinates —
-   * what the caret's per-frame position is offset from. The overlay is inside
-   * the scrollport, so a caret placed in these coordinates scrolls with the text
-   * it is writing rather than sliding off it when the view moves mid-burst.
-   */
-  function caretOrigin(node: HTMLElement) {
-    if (!scrollEl) return null;
-    const s = scrollEl.getBoundingClientRect();
-    const r = node.getBoundingClientRect();
-    return { x: r.left - s.left + scrollEl.scrollLeft, y: r.top - s.top + scrollEl.scrollTop };
-  }
-
-  /** Put the caret at a point in the scroll container's own coordinates. */
-  function caretTo(x: number, y: number, h: number) {
-    if (!barsEl) return;
-    if (!typeCaret) {
-      typeCaret = document.createElement("div");
-      typeCaret.className = "type-caret";
-      barsEl.append(typeCaret);
-    }
-    typeCaret.style.height = `${h}px`;
-    gsap.set(typeCaret, { x, y, autoAlpha: 1 });
-  }
-
-  /** Nothing is being written. The caret is not idling anywhere — it is gone. */
-  function caretOff() {
-    if (typeCaret) gsap.set(typeCaret, { autoAlpha: 0 });
   }
 
   /** Whole element hidden, opening left to right. The bar wipe's resting state. */
@@ -2152,7 +2867,10 @@
    * for everywhere else.
    */
   function boxIn(node: HTMLElement) {
-    if (reduceMotion) return;
+    // Same flood control as the reveal, and for the same reason: a `git diff`
+    // mounts hundreds of these at once and all but a handful of them are
+    // nowhere the reader can see.
+    if (reduceMotion || !inView(node)) return;
     gsap.from(node, {
       autoAlpha: 0,
       y: INSTANT_RISE * window.innerHeight,
@@ -2171,21 +2889,53 @@
    * whole box could not: a clip on a parent hides its children whatever the
    * children are doing.
    */
-  function revealStatic(node: HTMLElement) {
-    // Held rather than skipped, exactly as the typewriter is: the element is
-    // still owed its reveal, it just cannot start inside a container that is
-    // itself still travelling.
+  function revealStatic(node: HTMLElement, live = false) {
+    // Held rather than skipped: the element is still owed its reveal, it just
+    // cannot start inside a container that is itself still travelling.
     if (revealHeld) return;
-    // A static element is final by definition — there is no next chunk to hide
-    // from, so nothing here needs the persistent clip the typewriter keeps.
+    // Revealed once, whatever happens next. Dropping the entry here is what
+    // makes a re-render cheap: the element animates on the chunk it mounted in
+    // and later chunks only rewrite its text.
     revealed.delete(node);
+
+    // **Off screen: shown, and nothing else happens.** This test used to sit
+    // further down, after the tier walk and after the character split had
+    // already run — so an element nobody could see paid for a DOM walk, had its
+    // text replaced with hundreds of spans, and had them put back. A long `git
+    // diff` is mostly off-screen elements, and that was the whole of its cost.
+    // Preparing a reveal is not free, so the question has to be asked before any
+    // of the preparation, not after it.
+    if (!inView(node)) {
+      show(node);
+      return;
+    }
 
     const tiers = labelsIn(node);
     const clipped = tiers.flat();
     const labels = new Set<Element>(clipped);
     // The element being a label itself — a heading is one, whole — means there
     // is no prose left over to wave: it is all bar.
-    const split = labels.has(node) ? null : splitChars(node, labels);
+    //
+    // **`live` is the DOM-safety switch, and it is not a style choice.** The
+    // wave replaces the element's text nodes with per-character spans, and
+    // Svelte re-renders an output element from the parser on every chunk of the
+    // command that is still running. Splitting one of those hands its text to a
+    // render that is about to throw it away — the element freezes at whatever it
+    // held when the split ran, or the animation tears mid-flight. A pager makes
+    // this constant rather than occasional: `less` repaints the *whole* block on
+    // every keypress, so every element in it is changing, not just the last.
+    // Live elements therefore rise as one piece and never get split. The bars
+    // are safe either way — they are overlay divs, and the only thing they write
+    // into the element is a `clipPath` that a re-render simply drops.
+    //
+    // `splittable` is the other half of the question, and it is a style call
+    // rather than a safety one: a list's text is parallel rows, so a wave that
+    // crosses it reads as one ribbon of characters instead of a set of items.
+    // It rises as one piece through the same branch a live element takes.
+    const split =
+      live || labels.has(node) || !splittable(node.classList)
+        ? null
+        : splitChars(node, labels);
     const bars: HTMLElement[] = [];
 
     function done() {
@@ -2205,13 +2955,9 @@
       done();
     });
 
-    // Nothing on screen animates. The clips have to be written before the
-    // element is shown either way, or a label is briefly at full strength.
+    // The clips are written before the element is shown, or a label is briefly
+    // at full strength.
     for (const el of clipped) el.style.clipPath = HIDDEN_CLIP;
-    if (!inView(node)) {
-      done();
-      return;
-    }
 
     if (split) gsap.set(split.chars, { autoAlpha: 0, y: WAVE_RISE });
     // Hidden since the action; from here the reveal's own hiding is in place
@@ -2245,8 +2991,9 @@
         waveAt,
       );
     } else if (!clipped.includes(node)) {
-      // Too long to split, and not a label: it rises as one piece. The gesture
-      // is the same, the resolution is coarser.
+      // Not split — either still live, or too long to be worth it, and not a
+      // label. It rises as one piece: the same gesture at the coarsest possible
+      // resolution, which is what the wave already degrades to for a code block.
       tl.from(
         node,
         { autoAlpha: 0, y: WAVE_RISE, duration: WAVE_CHAR, ease: "power2.out" },
@@ -2285,17 +3032,14 @@
     landStatics();
     for (const [node, tween] of [...revealing]) {
       tween.progress(1).kill();
-      // Cleared, not left at the tween's end value: the loop below re-parks
-      // every typewriter element against the new layout.
       unclip(node);
     }
     revealing.clear();
     dropBars();
-    for (const node of revealed.keys()) {
-      const m = metricsOf(node);
-      revealed.set(node, m.rows);
-      rest(node, m.rows, m);
-    }
+    // Everything still registered is owed a reveal it has not started. A reflow
+    // changes what those elements say nothing about, so they stay hidden and
+    // stay queued; the next pass reveals them against the layout that exists.
+    queueReveal();
   }
 
   /**
@@ -2314,9 +3058,6 @@
    */
   function dropBars() {
     barsEl?.replaceChildren();
-    // The caret is in there too, so it went with them. Forgetting the reference
-    // would leave every later reveal writing to a detached node.
-    typeCaret = undefined;
   }
 
   /** Ctrl+C, `clear`, unmount. Every in-flight reveal lands and is dropped. */
@@ -2371,47 +3112,27 @@
    * control: it reveals the element as one unit, so it has no rows to clamp and
    * only needs the yes/no the row clamp derives from.
    */
+  /**
+   * The scrollport's rect for the duration of one pass. Read once rather than
+   * per element: a pass over a long block asks this question hundreds of times,
+   * and the answer cannot change while it is running.
+   */
+  let passView: DOMRect | undefined;
+
   function inView(node: HTMLElement) {
     if (!scrollEl) return false;
-    const view = scrollEl.getBoundingClientRect();
+    const view = passView ?? scrollEl.getBoundingClientRect();
     const rect = node.getBoundingClientRect();
     return rect.bottom > view.top && rect.top < view.bottom;
   }
 
   /**
-   * The rows of `node` that intersect the scroll viewport right now, as a
-   * half-open `[from, to)` range of row indices.
+   * The block that is still awaiting a response, if there is one — the only
+   * block anything can still be appended to, and so the only one with a growing
+   * edge to hold back.
    *
-   * The reveal is only ever allowed to animate inside this window. Rows above
-   * it have scrolled past and rows below it are off the bottom edge — animating
-   * either burns a tween on something nobody can see, and on a long command
-   * that is most of the output. `from >= to` means the element is entirely off
-   * screen.
-   */
-  function visibleRows(node: HTMLElement, m: { rows: number; row: number }) {
-    if (!scrollEl) return { from: 0, to: 0 };
-    const view = scrollEl.getBoundingClientRect();
-    const rect = node.getBoundingClientRect();
-    const from = Math.max(0, Math.floor((view.top - rect.top) / m.row));
-    const to = Math.min(m.rows, Math.ceil((view.bottom - rect.top) / m.row));
-    return { from, to };
-  }
-
-  /**
-   * The block that is still awaiting a response, if there is one.
-   *
-   * This is what decides which reveal an element gets, and deciding it *here*
-   * rather than at mount is the point — at mount nothing has arrived yet, so
-   * nothing is known. The typewriter is a picture of a program writing, and it
-   * is only honest while something is being written, so **everything inside the
-   * open block types** and everything outside it — a block whose command has
-   * already returned — gets the static reveal.
-   *
-   * The narrower rule this replaces gave the typewriter to the last registered
-   * element only, which meant a line typed itself and then the lines that
-   * arrived under it in the same command swept in on bars instead: two
-   * animations inside one block, deciding between themselves on the accident of
-   * which chunk boundary fell where. One block, one animation.
+   * Asked here rather than at mount, because at mount nothing has arrived and
+   * nothing is knowable.
    */
   function awaitingBlock(last: Element | null | undefined) {
     return last?.classList.contains("open") ? last : null;
@@ -2441,149 +3162,60 @@
     // rendered node for the life of the session.
     const last = scrollEl?.querySelector("section:last-of-type");
     const open = awaitingBlock(last);
-    // One element types at a time. The stagger the eye reads is between one
-    // block and the next, so a second burst starting under the first would be
-    // the two beats collapsing back into one.
-    let typing = false;
-    for (const node of [...revealed.keys()]) {
-      if (revealing.has(node)) {
-        // A static reveal drops its entry from `revealed`, so an element in both
-        // maps is a typewriter still running — which is the thing being waited
-        // on, and the only thing that has a caret.
-        typing = true;
-        continue;
-      }
-      if (revealing.has(node)) continue;
-      // `instant` takes the element out of the reveal system entirely: one rise
-      // and it is done, including the live one. An element that already has
-      // rows on screen was mid-typewriter when the mode changed — it is shown
-      // where it stands rather than replayed, under the same rule the split
-      // below follows, since re-revealing text the reader has read is the exact
-      // thing that reads as messy.
-      if (revealMode === "instant") {
-        if ((revealed.get(node) ?? 0) > 0) {
-          unclip(node);
-          show(node);
-          revealed.delete(node);
+    // Which elements of an open block are unsafe to character-split, and it is
+    // not all of them — treating it as all of them is what took the wave off
+    // every code block in a running command.
+    //
+    // Two are unsafe, for two different reasons:
+    //
+    //  - **The last element**, because output is appended to it. Everything
+    //    above it in the same block has been passed by the parser and only gets
+    //    rewritten if the text itself changes, which for append-only output it
+    //    does not.
+    //  - **Every element of a block that has been seen to shrink.** A block only
+    //    gets shorter when a program is redrawing its own screen, and a redraw
+    //    rewrites all of it — `less` repaints on every keypress. Once a block
+    //    has done that it is assumed to keep doing it, because it will.
+    const repainting = open?.hasAttribute("data-repaint") ?? false;
+    const edge = open && !repainting ? growingEdge(open) : null;
+    passView = scrollEl?.getBoundingClientRect();
+    try {
+      for (const node of [...revealed.keys()]) {
+        if (revealing.has(node)) continue;
+        if (revealMode === "instant") {
+          revealInstant(node);
           continue;
         }
-        revealInstant(node);
-        continue;
+        const unsafe = !!open?.contains(node) && (repainting || node === edge);
+        revealStatic(node, unsafe);
       }
-      if (!open || !open.contains(node)) {
-        // The command has returned, so this element can never grow again — and
-        // therefore must never be clipped again either. This is also the only
-        // place a partially revealed element gets shown in full, which is the
-        // safety net under every row-count assumption in this region.
-        if ((revealed.get(node) ?? 0) > 0) {
-          // Already typed. It has been read once; revealing it a second time in
-          // a different animation is the "messy" this whole split exists to
-          // remove. Show it and let it go.
-          unclip(node);
-          show(node);
-          revealed.delete(node);
-          continue;
-        }
-        revealStatic(node);
-        continue;
-      }
-      // Inside the block still awaiting a response: it types. Off-screen
-      // elements are let through even while something else is typing — they
-      // have nothing to animate, and holding them behind a burst nobody can see
-      // them under is a queue that only ever grows.
-      if (typing && inView(node)) continue;
-      revealElement(node);
-      if (revealing.has(node)) typing = true;
+    } finally {
+      passView = undefined;
     }
-    if (!typing) caretOff();
   }
 
-  function revealElement(node: HTMLElement) {
-    const done = revealed.get(node) ?? 0;
-    const m = metricsOf(node);
-    const rows = m.rows;
-    if (rows - done <= 0) return;
-    // Held rather than skipped: the rows are still owed, they just cannot start
-    // until the container has arrived. The handoff re-queues on landing.
-    if (revealHeld) return;
-
-    // The animated span is the intersection of what is owed with what is on
-    // screen. Rows above the viewport have already been scrolled past and rows
-    // below it are off the bottom edge, so both are simply shown: a reveal
-    // nobody can watch is cost with no effect, and on a long command it is
-    // nearly all of the output. This is also what makes "move down" cheap —
-    // the tail is the only thing on screen, so the tail is the only thing that
-    // ever animates, however many rows the command produced.
-    const win = visibleRows(node, m);
-    const start = Math.max(done, win.from);
-    const target = Math.min(rows, win.to);
-    const pending = target - start;
-    // Flood control, and the same treatment for a block nobody is looking at.
-    // Forty rows is more than a screenful and more than one burst can carry —
-    // past that the terminal is lying about what has finished. `npm install`
-    // emits thousands.
-    if (pending <= 0 || pending > FLOOD_ROWS) {
-      revealed.set(node, rows);
-      // Parked at the full row count, which shows everything — but still
-      // *clipped*, so the next chunk's rows are hidden the frame they land.
-      rest(node, rows, m);
-      show(node);
-      return;
+  /**
+   * The last tracked element of an open block in document order — the one
+   * output is still being appended to.
+   *
+   * The command line is excluded: it is written once and never appended to, and
+   * it is the *first* element in the block, so a command that has not produced
+   * output yet would otherwise nominate it and lose its wave for no reason.
+   *
+   * Document position rather than insertion order, since the map is keyed by
+   * mount and a re-render can register a node out of the order it appears in.
+   */
+  function growingEdge(open: Element) {
+    let edge: HTMLElement | null = null;
+    for (const node of revealed.keys()) {
+      if (!open.contains(node) || node.classList.contains("head-text")) continue;
+      if (!edge || edge.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        edge = node;
+      }
     }
-    // One burst for the whole element, floored and capped: a one-line result and
-    // an eight-line block are both a single beat, which is what makes the block
-    // the unit rather than the row.
-    const burst = gsap.utils.clamp(TYPE_MIN, TYPE_MAX, pending * TYPE_ROW);
-    // "Move down" exists for the reader who wants to be current, so playing the
-    // reading pace there contradicts the point of the mode. The burst shortens
-    // with the backlog instead, converging on instant and hitting the flood
-    // threshold at the same place it would anyway. The wipe and the stepping are
-    // identical in both modes — only the rate changes, or the setting becomes a
-    // choice between two different products.
-    const duration = revealStagger(pending, burst, FLOOD_ROWS, scrollMode === "bottom");
-
-    // One tween walks a row cursor from `done` to `rows` and the clip is
-    // written from it: everything above the cursor at full width, the cursor's
-    // own row wiped to the nearest character boundary, everything below hidden.
-    // Rows that arrive mid-flight are simply below the cursor, so they are
-    // already clipped and get picked up by the pass that follows.
-    const at = { row: start };
-    // Re-parked synchronously against *this* pass's metrics. The element was
-    // already clipped — it has been since it mounted — but a chunk that
-    // changed the wrap changed the row band with it.
-    rest(node, start, m);
-    show(node);
-    // The caret's origin, measured once. The element can grow under it, but only
-    // downward and only into rows this burst is not writing — a re-measure per
-    // frame would be a forced layout on every frame of every reveal.
-    // ponytail: origin taken at the start; a mid-burst reflow would drag the
-    // caret off the text. Re-measure per row if wrapping mid-command shows up.
-    const origin = caretOrigin(node);
-    const tween = gsap.to(at, {
-      row: target,
-      duration,
-      ease: "none",
-      onUpdate() {
-        node.style.clipPath = revealClip(at.row, m.row, m.cells);
-        if (origin) {
-          const head = revealHead(at.row, m.row, m.cells);
-          caretTo(origin.x + head.x * node.clientWidth, origin.y + head.y, m.row);
-        }
-      },
-      onComplete() {
-        revealing.delete(node);
-        revealed.set(node, rows);
-        // Parked, not cleared. The element may still grow, and an unclipped
-        // element shows the next chunk's text for the frame before the reveal
-        // pass runs — which is the flash this design exists to avoid. The clip
-        // at the full row count hides nothing, because the row band is the
-        // element's own height divided by its own row count.
-        rest(node, rows, m);
-        queueReveal();
-      },
-    });
-    revealing.set(node, tween);
+    return edge;
   }
+
   // #endregion ────────────────────────────────────────────────────────────────
 
   /**
@@ -2606,6 +3238,43 @@
     return {
       destroy() {
         gsap.killTweensOf(node);
+      },
+    };
+  }
+
+  /**
+   * The indeterminate bar shown while a command has produced nothing yet.
+   *
+   * Ambient tier: it says "still working", it is not asking to be looked at, so
+   * it is slow and low-contrast and never competes with output arriving beside
+   * it. It also does not appear at all for the first third of a second — most
+   * commands are finished by then, and a bar that flashes on every fast command
+   * is worse than no bar.
+   *
+   * Loops forever by construction, so the kill path is not optional: the
+   * element unmounts the moment output lands or the command exits, and
+   * `destroy` is what stops the timeline. See ANIMATION.md's cleanup rule.
+   */
+  function runBar(node: HTMLElement) {
+    if (reduceMotion) return;
+    const head = document.createElement("span");
+    head.className = "run-bar-head";
+    node.append(head);
+    const tl = gsap
+      .timeline({ delay: 0.35 })
+      .from(node, { autoAlpha: 0, duration: 0.25, ease: "power2.out" })
+      // Travels the track and back rather than wrapping around: a bar that
+      // teleports to the start reads as a stutter at this speed.
+      .fromTo(
+        head,
+        { xPercent: 0 },
+        { xPercent: 300, duration: 0.9, ease: "power1.inOut", repeat: -1, yoyo: true },
+        0,
+      );
+    return {
+      destroy() {
+        tl.kill();
+        head.remove();
       },
     };
   }
@@ -2689,16 +3358,27 @@
     settle(node, 0.97, { tl: copyPull, at: 0.12 });
   }
 
-  // Right-click copies a block's output. Shift+right-click copies it
-  // reconstructed as real markdown syntax, via the same parser that drives
-  // the on-screen rendering — one source of truth for "what is a heading".
-  function copyBlock(e: MouseEvent, block: Block) {
-    e.preventDefault();
-    pullToCursor(e.currentTarget as HTMLElement, e);
-    const asMarkdown = e.shiftKey;
+  // The copy itself, without the gesture: the pointer and the keyboard reach
+  // this by different routes and acknowledge themselves differently, but what
+  // lands on the clipboard is one decision in one place.
+  //
+  // The markdown form is reconstructed by the same parser that drives the
+  // on-screen rendering — one source of truth for "what is a heading".
+  function copyText(block: Block, asMarkdown: boolean) {
     const text = asMarkdown ? toMarkdown(blockNodes(block)) : block.buffer;
     navigator.clipboard.writeText(text);
     notify(asMarkdown ? "Copied as markdown" : "Copied output");
+  }
+
+  // Right-click copies a block's output. Shift+right-click copies it as
+  // markdown. The pointer's copy also focuses the block: a block the user just
+  // acted on is the block the next key should act on, and a second notion of
+  // "the one I mean" is what phase-7-navigation.md exists to prevent.
+  function copyBlock(e: MouseEvent, block: Block) {
+    e.preventDefault();
+    focusedId = block.id;
+    pullToCursor(e.currentTarget as HTMLElement, e);
+    copyText(block, e.shiftKey);
   }
 
   // #region Drag and drop ────────────────────────────────────────────────────
@@ -2733,6 +3413,9 @@
     if (!paths.length) return;
     refocus();
     if (paths.length === 1) {
+      // Summoned, not typed: these are "how do you want to run this", so the
+      // strip owns Enter for as long as they are up.
+      menuAuto = false;
       openMenu(runOptions(paths[0], shellIsWindows()), cursorCol);
       return;
     }
@@ -2768,7 +3451,8 @@
   // Nothing here executes anything. Accepting writes the line at the prompt and
   // stops; Enter is still the user's to press. Same rule the drop already had.
 
-  type Suggestion = { text: string; hint: string };
+  /** `start` is the column this item replaces from; absent means the strip's own. */
+  type Suggestion = { text: string; hint: string; start?: number };
 
   let menuItems = $state<Suggestion[]>([]);
   let menuIndex = $state(0);
@@ -2776,6 +3460,16 @@
   let menuEl = $state<HTMLElement | undefined>();
   /** Column the accepted text replaces from — the start of the token under the cursor. */
   let menuStart = 0;
+  /**
+   * Whether the strip put itself up from what is being typed, rather than being
+   * summoned by a drop or by Tab.
+   *
+   * One thing turns on it: an auto strip **never takes Enter**. It is up almost
+   * all the time now, and a strip that is always up and owns Enter is a strip
+   * that has quietly taken over submitting commands. Tab and → accept; Enter
+   * runs the line, always.
+   */
+  let menuAuto = $state(false);
 
   /** How far the strip travels on enter and leave, as a fraction of the viewport. */
   const MENU_RISE = 0.02;
@@ -2872,7 +3566,15 @@
     const item = menuItems[menuIndex];
     closeMenu();
     if (!item) return;
-    const back = Math.max(0, cursorCol - menuStart);
+    // Per item, not per strip: a history match replaces the whole line while a
+    // path match replaces one word, and they can be in the same list.
+    //
+    // Erasing back to the start and rewriting is also what makes the *case*
+    // right. Appending only the missing characters left `cla` + `UDE.md` on
+    // screen and, worse, sent that to the shell — a filename that does not
+    // exist on a case-sensitive filesystem. The name on disk replaces the name
+    // as typed.
+    const back = Math.max(0, cursorCol - (item.start ?? menuStart));
     invoke("pty_write", { data: "\x7f".repeat(back) + item.text });
     refocus();
   }
@@ -2895,18 +3597,35 @@
     );
     // The listing is a round trip; the prompt may have moved on inside it.
     if (!atPrompt) return;
+    menuAuto = false;
     openMenu(completions(entries, base, dir, shellIsWindows()), start);
   }
 
-  /** Keys the strip owns while it is open. Tab opens it, so it always owns Tab. */
+  /**
+   * Keys the strip owns. Tab always, since Tab is how a match is taken.
+   *
+   * Enter only when the strip was summoned deliberately. A strip that puts
+   * itself up as you type is up for most of every line, and one that owned
+   * Enter would have taken over running commands.
+   */
   function menuOwns(key: string) {
-    return key === "Tab" || (menuOpen && (key === "ArrowUp" || key === "ArrowDown" || key === "Enter"));
+    if (key === "Tab") return true;
+    if (!menuOpen) return false;
+    if (key === "Enter") return !menuAuto;
+    return key === "ArrowUp" || key === "ArrowDown";
   }
   // #endregion ────────────────────────────────────────────────────────────────
 
   onMount(() => {
-    // Before the terminal exists: the token layer defaults to indigo, so a
-    // restored accent has to land before anything reads a resolved value.
+    // The config is a round trip, so the first frame is always the defaults and
+    // the restored values land a frame or two later. That is only visible as an
+    // accent flicker on a non-default accent, and the alternative — holding the
+    // whole terminal back on a file read — costs every launch to save one.
+    invoke<Config>("config_load").then(applyConfig).catch(() => {});
+    // The file half of the two-way sync. External edits arrive here; the app's
+    // own writes never do, filtered in `config.rs` by comparing content.
+    const unlistenConfig = listen<Config>("config-changed", (e) => applyConfig(e.payload));
+
     document.documentElement.style.setProperty("--accent", ACCENTS[accent].value);
 
     // Local alias keeps the non-undefined narrowing inside the callbacks below;
@@ -2944,7 +3663,12 @@
       if (mode !== "raw" && atPrompt && menuOwns(e.key)) {
         e.preventDefault();
         if (e.type === "keydown") {
-          if (e.key === "Tab") openCompletions();
+          // Tab takes the ghost when there is one. It is the completion already
+          // on screen, so Tab confirming it is the shortest path from what is
+          // shown to what is meant — and the strip is the same answer wearing a
+          // second row. The strip is still there for everything the ghost has
+          // no single obvious answer for; see tasks.md for the cost.
+          if (e.key === "Tab") menuOpen ? acceptMenu() : openCompletions();
           else if (e.key === "Enter") acceptMenu();
           else moveMenu(e.key === "ArrowDown" ? 1 : -1);
         }
@@ -2970,6 +3694,53 @@
         if (e.type === "keydown") e.preventDefault();
         return false;
       }
+
+      // Block navigation and the keyboard copy. Both are chords rather than
+      // bare keys, and deliberately: a bare Up/Down is the shell's history and
+      // the suggestion strip's selection, and a terminal that takes either has
+      // broken something everybody already knows how to use. Ctrl+Shift+C is
+      // the copy chord every terminal already uses, for the same reason.
+      //
+      // Raw mode is exempt throughout — a full-screen app owns its keyboard.
+      if (mode !== "raw" && e.ctrlKey && !e.altKey) {
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          e.preventDefault();
+          if (e.type === "keydown") moveFocus(e.key === "ArrowDown" ? 1 : -1);
+          return false;
+        }
+        // The cwd panel. Ctrl+B costs readline's backward-char, which is the
+        // left arrow with extra steps and the cheapest binding in the set to
+        // lose; raw mode keeps it, so tmux's prefix is untouched. Recorded in
+        // tasks.md alongside the Esc/clear-line trade rather than assumed.
+        if (!e.shiftKey && /^[bB]$/.test(e.key)) {
+          e.preventDefault();
+          if (e.type === "keydown") togglePanel();
+          return false;
+        }
+        // Two chords rather than one plus a modifier: the pointer's
+        // shift+right-click has a base gesture to modify, and a chord does not.
+        // `stopPropagation` as well, for the same reason F3 needs it: the
+        // webview binds Ctrl+Shift+C itself and returning false only stops xterm.
+        const copy = e.shiftKey && /^[cCmM]$/.test(e.key);
+        if (copy) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.type === "keydown") copyFocused(e.key === "m" || e.key === "M");
+          return false;
+        }
+      }
+      // Accept the ghost completion. → is free for this: with the caret at the
+      // end of the line a right arrow moves nowhere, so nothing is taken from
+      // the shell that it was doing anything with. The text is *sent to the
+      // shell* rather than written into the mirror — the shell owns the line,
+      // and the mirror is a reading of its screen. Typing it is what makes the
+      // completion a real edit the user can then backspace through.
+      if (mode !== "raw" && atPrompt && ghost && e.key === "ArrowRight" && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        if (e.type === "keydown") acceptMenu();
+        return false;
+      }
+
       if (e.type === "keydown" && atPrompt && mode !== "raw") {
         if (e.key === "Backspace" && cursorCol === 0) nudgeCaret(-1);
         if (e.key === "Delete" && cursorCol >= input.length) nudgeCaret(1);
@@ -3011,6 +3782,11 @@
         selFrom = 0;
         selTo = 0;
         pendingCommand = "";
+        // The command that just finished is exactly the thing that creates and
+        // deletes files, so a listing taken before it is not evidence about the
+        // directory now.
+        dirCache.clear();
+        dirVersion++;
       } else if (data === "B") {
         promptReady = true;
         booted = true;
@@ -3019,7 +3795,11 @@
         // same chunk usually carries the next prompt, and by the time that
         // callback runs the cursor has already moved onto the prompt row.
         const block = currentBlock();
-        if (block && !block.closed) snapshot(block);
+        if (block && !block.closed) {
+          snapshot(block);
+          // The command is over, so there is provably nothing more to wait for.
+          showNow(block);
+        }
         closeBlock(Number(data.split(";")[1] ?? -1));
         betweenCommands = true;
         // A command that finishes inside one chunk writes its whole output
@@ -3197,10 +3977,11 @@
           block = currentBlock()!;
         }
         snapshot(block);
-        // New rows may have landed. The pass itself runs on the next frame, by
-        // which point Svelte has flushed this buffer change into the DOM —
-        // measuring rows before that would measure the previous chunk's layout.
-        queueReveal();
+        // Not `queueReveal` directly: the reveal pass follows whatever the
+        // renderer took, and the renderer takes the buffer only once the stream
+        // goes quiet. Revealing a structure that is about to be re-derived is
+        // what animated nodes on their way to being thrown away.
+        showSoon(block);
       });
     };
 
@@ -3212,7 +3993,6 @@
     const ready = invoke("pty_attach", {
       cols: t.cols,
       rows: t.rows,
-      cwd: null,
       onData,
     });
 
@@ -3243,6 +4023,10 @@
         const local = command ? localCommand(command) : undefined;
         const typed = input.length || pendingCommand.length;
         if (command) {
+          // Local commands too: `open` and `clear` are typed as often as
+          // anything the shell runs, and a history that skips them is a history
+          // with holes exactly where the app's own features are.
+          remember(command);
           if (local) local();
           else {
             atPrompt = false;
@@ -3303,28 +4087,57 @@
       if (cols !== t.cols) t.resize(cols, t.rows);
     }
 
-    const observer = new ResizeObserver(() => {
+    function afterResize() {
       syncSize();
       // The debug overlay reports window dimensions, and a resize is the one
       // thing that changes them without any PTY traffic to tick on.
       if (debugOn) debugTick++;
       // Reflow moved every row; re-read the open block at the new width.
       const block = currentBlock();
-      if (block && !block.closed) snapshot(block);
+      // Reflow is not new output, so it is shown at once rather than waited on —
+      // holding it back would leave the block laid out at the old width.
+      if (block && !block.closed) {
+        // Reflow rewrote every row, so the resumable read is worthless here.
+        snapshot(block, true);
+        showNow(block);
+      }
       // Same reflow, other consumer: rows that appeared because the window
       // narrowed are not new content and must not be revealed again.
       settleReveals();
       // A cached rect from before the resize positions the hover ring wrong.
       hotRect = undefined;
       ready.then(() => invoke("pty_resize", { cols: t.cols, rows: t.rows }));
+    }
+
+    // Everything above runs once per observed change, and none of it is cheap:
+    // it re-reads the open block out of xterm's buffer, re-renders it, walks
+    // every tracked reveal and round-trips to Rust. The cwd panel tweens a
+    // layout property, so without this guard all of that would run on every
+    // frame of the band's 0.34s — thirty times, for a width that is still
+    // moving. The tween calls it once when it lands, which is the only frame
+    // the answer is final. `syncBand` is how it reaches back in here.
+    syncBand = afterResize;
+    const observer = new ResizeObserver(() => {
+      if (bandMoving) return;
+      afterResize();
     });
     observer.observe(wrapper);
+    // The cwd panel narrows the scrollport without changing the window, so the
+    // xterm wrapper above never moves and its observer never fires. `.scroll`'s
+    // content box is what actually shrinks, and the PTY's column count is
+    // derived from it — without this the shell keeps wrapping at the full
+    // width and every long row grows a stub line behind it.
+    observer.observe(scrollEl);
     const unwatchDrops = watchDrops();
 
     return () => {
       unwatchDrops();
+      unlistenConfig.then((off) => off());
+      clearTimeout(saveTimer);
+      clearTimeout(showTimer);
       observer.disconnect();
       scrollTween?.kill();
+      bandTween?.kill();
       killHandoff();
       killReveals();
       clearTimeout(noticeTimer);
@@ -3345,6 +4158,7 @@
      `var(--font-inside)` and stays unaware of how many modes exist. -->
 <div
   class="app"
+  bind:this={appEl}
   style:--font-outside={FONT_MODES[fontMode].outside}
   style:--font-inside={FONT_MODES[fontMode].inside}
   onclick={refocus}
@@ -3376,12 +4190,32 @@
             <div>/help for commands</div>
           </div>
         {:else}
+          <!-- `data-id` is how the focus model finds an element for a block:
+               the blocks are keyed data and the DOM node is created by an
+               `{#each}`, so there is nothing to hold a ref on. Clicking selects
+               the same one notion of focus the keyboard moves — a pointer and a
+               keyboard growing separate ideas of "the one I mean" is exactly
+               what phase-7-navigation.md says breaks every later consumer.
+
+               The a11y suppression is the one case the rule cannot see: the
+               keyboard path for this exists and is Ctrl+Up / Ctrl+Down, but it
+               is a global chord on xterm's key handler rather than a listener
+               on this element, because xterm owns focus for the whole app and a
+               focusable block would take the keyboard away from the shell. A
+               `<button>` here would be worse on both counts — it is a region of
+               output, and it would be a tab stop per command. -->
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <section
             class="block"
             class:open={!block.closed}
+            class:focused={focusedId === block.id}
+            data-id={block.id}
             role="group"
             use:blockEnter
             use:anchorNewBlock
+            use:growBlock
+            onclick={() => (focusedId = block.id)}
             oncontextmenu={(e) => copyBlock(e, block)}
           >
             <!-- The pointer-tracked ring. A sibling layer rather than a border
@@ -3403,9 +4237,16 @@
                   <h2 class="md-heading" class:warn={node.tone === "warn"} class:ok={node.tone === "ok"} use:reveal>{node.text}</h2>
                 {/if}
               {:else if node.kind === "list"}
-                <ul class="md-list" use:reveal>
+                <!-- The row is the reveal unit, not the list. A list grows a row
+                     at a time — `ping` adds one a second — and a reveal attached
+                     to the `<ul>` fires once, on the chunk the list first mounted
+                     in, so every row after that appeared with no animation at
+                     all. One action per `<li>` means a row animates when it
+                     arrives, which is the same rule everything else in a block
+                     follows. -->
+                <ul class="md-list">
                   {#each node.items as item}
-                    <li>{item}</li>
+                    <li class="md-row" use:reveal>{item}</li>
                   {/each}
                 </ul>
               {:else if node.kind === "code"}
@@ -3441,18 +4282,36 @@
               <div class="block-result" class:ok={block.exitCode === 0} class:err={block.exitCode !== 0} use:resultPulse>
                 {block.exitCode === 0 ? "done" : `exit ${block.exitCode}`}
               </div>
+            {:else if block.cwd}
+              <!-- The result line's slot before there is a result: what the
+                   command is doing, and how to get out of it. A pager is the
+                   case that earns this — `less` takes the keyboard and only
+                   answers to `q`, and nothing on screen says so, which is how a
+                   terminal ends up feeling stuck. Read off the pager's own
+                   prompt rather than the command's name; see `runHint`. -->
+              <div class="block-running">
+                <!-- A command that has produced nothing yet is the one case
+                     where a hint alone is not enough: the box is empty, so
+                     there is no evidence on screen that anything is happening
+                     at all. `npm ls --all` sits like that for seconds. Strictly
+                     *nothing shown yet* — once output exists it is its own
+                     proof of life and a bar beside it would be noise. -->
+                {#if !block.shown}<span class="run-bar" use:runBar></span>{/if}
+                <span>{runHint(block.buffer)}</span>
+              </div>
             {/if}
           </section>
         {/if}
       {/each}
-      {#if atPrompt}
-        <!-- Mirrors the docked input bar into the scroll stream, so the very
-             first prompt (and every prompt) has a live "> " line here too,
-             not only in the fixed bar. Becomes a real block on Enter. -->
-        <div class="block-head live ghost" use:tailNudge>
-          <span class="ghost-mark">&gt;</span> {promptCwd}<span class="block-sep">&nbsp;|&nbsp;</span><span class="live-text">{input}</span>
-        </div>
-      {/if}
+      <!-- There used to be a mirror of the docked input bar here, so the stream
+           carried a live "> " line of its own. It was written while `atPrompt`
+           was a plain `let` — which Svelte 5 compiles as a constant read — so it
+           never rendered once, and nobody saw that it says exactly what the
+           docked bar an inch below it says. Two identical controls one above the
+           other make the reader work out which one they are typing into, and the
+           answer is always the bar: it owns the caret, the selection, and the
+           suggestion strip, and the handoff measures its rect. The stream shows
+           what has happened; the bar is where things are said. -->
       <!-- Height is written directly by `syncTail`, not bound to state: the
            scroll position is read back in the same call, and a reactive update
            would not be in the layout yet. -->
@@ -3477,126 +4336,104 @@
     </div>
   </div>
 
-  <!-- Esc. Overlay in place over the terminal with a blurred backdrop, per
-       decisions.md — not a window, and not an extension surface. -->
-  {#if settingsOpen}
-    <div
-      class="settings-backdrop"
-      bind:this={settingsBackdrop}
-      use:panelIn
-      onclick={(e) => { e.stopPropagation(); closeSettings(); }}
-      role="presentation"
-    >
-      <div class="settings" onclick={(e) => e.stopPropagation()} role="presentation">
-        <div class="settings-title">Settings</div>
-        <div class="settings-top">
-          <!-- The font modes as an X. Four wedges around one centre, because
-               that is what the four modes are: two slots, each pointing one of
-               two ways. A vertical list of four rows says nothing about the
-               shape of the choice; the X says it before the labels are read.
-               Order is the table's order — the four corners, reading like text:
-               top-left, top-right, bottom-left, bottom-right — and the wedge
-               classes are indexed off it rather than matched by nth-child, so
-               an added mode fails loudly instead of silently rotating the map. -->
-          <section class="settings-card">
-            <h2 class="card-title">Font</h2>
-            <div class="font-x">
-              <!-- The X itself, drawn once behind the four hit areas. Decoration
-                   only: it must never eat a click meant for a wedge. -->
-              <span class="x-mark" aria-hidden="true"></span>
-              {#each Object.entries(FONT_MODES) as [key, def], i}
-                <button
-                  class="wedge {WEDGES[i]}"
-                  class:active={fontMode === key}
-                  title={def.hint}
-                  onclick={(e) => setFontMode(key as FontMode, optionLabel(e.currentTarget))}
-                >
-                  <!-- Rendered in the font that mode gives to text outside a
-                       container, so each wedge is its own sample. -->
-                  <span class="settings-option-label" style:font-family={def.outside}
-                    >{def.label}</span
-                  >
-                </button>
-              {/each}
-            </div>
-          </section>
+  <!-- One row per entry, recursing into whatever is expanded. A snippet calling
+       itself is what a tree is, and it keeps the expansion state in one flat
+       array instead of a node type that has to carry its own children.
 
-          <!-- Swatches, not labelled rows: the value being chosen is a colour,
-               so the control should be the colour. -->
-          <section class="settings-card">
-            <h2 class="card-title">Color</h2>
-            <div class="swatch-grid">
-              {#each Object.entries(ACCENTS) as [key, def]}
-                <button
-                  class="swatch"
-                  class:active={accent === key}
-                  style:background={def.value}
-                  title={def.label}
-                  aria-label={def.label}
-                  onclick={() => setAccent(key as Accent)}
-                ></button>
-              {/each}
-            </div>
-          </section>
-        </div>
+       Indent is `padding-left` on the row rather than a nested container: the
+       rows stay siblings, so the hover target is the panel's full width at
+       every depth and nothing at depth six is one pixel wide. -->
+  {#snippet panelRows(rel: string, depth: number)}
+    <!-- Up. Only at the root, because that is the only level where "up" is not
+         already on screen — the parent of anything deeper is the row above it.
 
-        <!-- Both of these are two-state, so they are switches rather than a pair
-             of rows each — and both ends are on screen, with the knob between
-             them, because the choice is between two named things rather than an
-             on and an off. The lit side is the current state, and it is the
-             element `glitchLabel` fires on: the one thing on screen whose job at
-             that moment is to say *this changed*. -->
-        <section class="settings-card switch-card">
-          <div class="switch-group">
-            <h2 class="card-title card-title-center">Window Behavior</h2>
-            <button
-              class="switch-row"
-              title={SCROLL_MODES[scrollMode].hint}
-              onclick={(e) =>
-                setScrollMode(
-                  scrollMode === "top" ? "bottom" : "top",
-                  optionLabel(e.currentTarget, scrollMode === "top" ? 1 : 0),
-                )}
-            >
-              <span class="switch-side" class:on={scrollMode === "top"}>
-                <span class="settings-option-label">{SCROLL_MODES.top.label}</span>
-              </span>
-              <span class="switch" class:on={scrollMode === "bottom"}
-                ><span class="switch-knob"></span></span
-              >
-              <span class="switch-side" class:on={scrollMode === "bottom"}>
-                <span class="settings-option-label">{SCROLL_MODES.bottom.label}</span>
-              </span>
-            </button>
-          </div>
+         It is the one row with a single gesture: a tree cannot expand upward
+         (the parent contains the folder you are looking at, so opening it in
+         place is a loop), so `..` writes `cd ..` on a plain click, and shift
+         does the same rather than being a second answer to nothing. It also
+         does not run — the same rule as every other row here.
 
-          <div class="switch-group">
-            <h2 class="card-title card-title-center">Text Animations</h2>
-            <button
-              class="switch-row"
-              title={REVEAL_MODES[revealMode].hint}
-              onclick={(e) =>
-                setRevealMode(
-                  revealMode === "typewriter" ? "instant" : "typewriter",
-                  optionLabel(e.currentTarget, revealMode === "typewriter" ? 1 : 0),
-                )}
-            >
-              <span class="switch-side" class:on={revealMode === "typewriter"}>
-                <span class="settings-option-label">{REVEAL_MODES.typewriter.label}</span>
-              </span>
-              <span class="switch" class:on={revealMode === "instant"}
-                ><span class="switch-knob"></span></span
-              >
-              <span class="switch-side" class:on={revealMode === "instant"}>
-                <span class="settings-option-label">{REVEAL_MODES.instant.label}</span>
-              </span>
-            </button>
-          </div>
-        </section>
-
-        <div class="settings-foot">Esc to close</div>
+         Not in `list_dir`: `..` is not a fact about a directory. `completions`
+         in input.js adds it at the same layer and for the same reason. -->
+    {#if !rel}
+      <div class="cwd-row">
+        <span class="cwd-twist empty" aria-hidden="true"></span>
+        <button
+          class="cwd-entry dir up"
+          title="Go up one folder — puts `cd ..` at the prompt"
+          onclick={() => replaceLine("cd ..")}>..</button
+        >
       </div>
-    </div>
+    {/if}
+    {#each tree[rel] ?? [] as entry (entry.name)}
+      {@const child = joinRel(rel, entry.name)}
+      {@const open = expanded.includes(child)}
+      <div class="cwd-row" style:padding-left="{depth * 11}px">
+        {#if entry.dir}
+          <button
+            class="cwd-twist"
+            class:open
+            aria-label={open ? `Collapse ${entry.name}` : `Expand ${entry.name}`}
+            onclick={() => toggleDir(child)}>▸</button
+          >
+        {:else}
+          <!-- The twisty's width, kept, so file names line up with the folder
+               names above them rather than sliding under the arrows. -->
+          <span class="cwd-twist empty" aria-hidden="true"></span>
+        {/if}
+        <button
+          class="cwd-entry"
+          class:dir={entry.dir}
+          onpointerdown={(e) => panelDragStart(e, child)}
+          title={entry.dir
+            ? `${entry.name} — click to open, shift+click for cd`
+            : `${entry.name} — click or drag for how to run it`}
+          onclick={(e) => panelPick(e, entry, child)}>{entry.name}</button
+        >
+      </div>
+      {#if entry.dir && open}
+        {@render panelRows(child, depth + 1)}
+      {/if}
+    {/each}
+  {/snippet}
+
+  <!-- Ctrl+B. The one surface that takes width rather than covering it, so it
+       has no backdrop and no scrim: nothing behind it is being suspended.
+       Raw mode is exempt — a full-screen app owns the whole window. -->
+  {#if panelOpen && mode !== "raw"}
+    <aside class="cwd-panel" bind:this={panelEl} use:panelSlide>
+      <div class="cwd-panel-title" title={promptCwd}>{promptCwd || "—"}</div>
+      <div class="cwd-panel-list">
+        {@render panelRows("", 0)}
+        {#if !(tree[""] ?? []).length}
+          <div class="cwd-panel-empty">empty</div>
+        {/if}
+      </div>
+    </aside>
+  {/if}
+
+  <!-- Esc. Every value it shows lives here and every apply happens here; the
+       panel owns the markup, the CSS and both halves of its animation. -->
+  {#if settingsOpen}
+    <Settings
+      bind:this={settingsPanel}
+      {fontMode}
+      {scrollMode}
+      {revealMode}
+      {accent}
+      {startupDir}
+      {startAsAdmin}
+      {reduceMotion}
+      isWindows={IS_WINDOWS}
+      onFont={setFontMode}
+      onScroll={setScrollMode}
+      onReveal={setRevealMode}
+      onAccent={setAccent}
+      onStartupDir={setStartupDir}
+      onBrowse={pickStartupDir}
+      onAdmin={setStartAsAdmin}
+      onDismiss={closeSettings}
+    />
   {/if}
 
   <!-- F3. Sits above both panes on purpose: half of what it exists to diagnose
@@ -3629,12 +4466,15 @@
       </div>
     {/if}
     <div class="input-bar ghost" class:drop={dragOver} bind:this={inputBarEl} use:growUpward>
-      <span class="input-cwd"><span class="ghost-mark">&gt;</span> {promptCwd}</span><span class="block-sep">&nbsp;|&nbsp;</span><span class="input-text">{#each headSegments as part}<span class:sel={part.sel}>{part.text}</span>{/each}<span
+      <!-- The path is its own span so the handoff can clip it without clipping
+           the mark, which lives in the same box and is the thing doing the
+           clipping. -->
+      <span class="input-cwd"><span class="ghost-mark">&gt;</span> <span class="cwd-text">{promptCwd}</span></span><span class="block-sep">&nbsp;|&nbsp;</span><span class="input-text">{#each headSegments as part}<span class:sel={part.sel}>{part.text}</span>{/each}<span
           class="caret"
           class:idle={!atPrompt}
           class:typing
           bind:this={caretEl}
-        ></span>{#each tailSegments as part}<span class:sel={part.sel}>{part.text}</span>{/each}</span>
+        ></span>{#each tailSegments as part}<span class:sel={part.sel}>{part.text}</span>{/each}{#if ghost}<span class="ghost-suggest">{ghost}</span>{/if}</span>
     </div>
   {/if}
 </div>
@@ -3750,6 +4590,15 @@
   }
 
   .app {
+    /* The cwd panel's width, and the band it takes out of everything else.
+       Two properties rather than one so the consumers below can stay a single
+       `calc` that is simply zero while the panel is shut.
+
+       `clamp` for the same reason the settings panel uses one: a flat `dvw`
+       goes unreadable long before it goes small, because the file names in it
+       do not shrink with the window. */
+    --panel-w: clamp(180px, 18dvw, 300px);
+    --panel-open-w: 0px;
     position: relative;
     height: 100vh;
     display: flex;
@@ -3760,6 +4609,10 @@
        owns the one scrollport this app has. */
     overflow: hidden;
   }
+
+  /* `--panel-open-w` is written as an inline style by `moveBand`, never by a
+     class: it is tweened, and the whole point is the values between 0 and the
+     panel's width. The declaration above is only the resting state. */
 
   /* Both panes are stacked and always full-size, even while "hidden" — that
      keeps xterm's dimensions (and therefore the PTY size it reports) correct
@@ -3809,6 +4662,10 @@
        the last block can still be scrolled clear of it. `--input-h` is written
        by the bar's own resize observer; the fallback is its one-row height. */
     padding: 12px 3dvw calc(24px + var(--input-h, 42px));
+    /* The panel's band, given back. `padding` rather than a narrower box, so
+       the scrollbar overlay and the reveal's bar overlay keep the coordinates
+       they were already positioned in. */
+    padding-right: calc(3dvw + var(--panel-open-w));
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -3889,15 +4746,6 @@
      writing with it. It never blinks: it is moving, and a blink on a moving
      caret reads as two effects, not one. `:global` for the same reason as the
      bar — built in JS, so it never carries Svelte's scoping class. */
-  :global(.type-caret) {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 0.65ch;
-    background: var(--accent);
-    will-change: transform;
-  }
-
   /* Overlay track. `pointer-events: none` so the whole right edge of the output
      container does not stop swallowing clicks meant for the modules under it —
      only the thumb itself is interactive. */
@@ -3940,359 +4788,127 @@
     height: 100%;
   }
 
-  /* #region ── settings overlay ─────────────────────────────────────────── */
-  .settings-backdrop {
+  /* #region ── cwd panel ────────────────────────────────────────────────── */
+  .cwd-panel {
     position: absolute;
-    inset: 0;
-    z-index: 30;
-    display: flex;
-    /* Centred, not docked to an edge. The panel is a module resting over the
-       terminal; an edge-docked one reads as a drawer, which is the exact thing
-       decisions.md rules out. */
-    justify-content: center;
-    align-items: center;
-    /* Inset on every side: the panel is a module resting over the terminal,
-       not a drawer welded to the frame. See decisions.md. */
-    padding: 4dvh 3dvw;
-    background: var(--scrim);
-    backdrop-filter: blur(6px);
-  }
-
-  .settings {
-    /* Both bounds are viewport units, so nothing here is a fixed minimum:
-       30dvw is the floor on a wide window, 88dvw the ceiling on a narrow one,
-       and the middle term is only a preference between the two. A flat 30dvw
-       failed the other way — the panel's own text does not shrink with the
-       window, so a purely proportional width goes unreadable well before it
-       goes small. See decisions.md. */
-    width: clamp(30dvw, 32rem, 88dvw);
-    max-height: 88dvh;
+    top: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: var(--panel-w);
     box-sizing: border-box;
-    padding: 18px 16px;
+    /* Above the input bar (6) and the scrollbar (5), below the settings
+       overlay (30): settings suspends everything, this sits beside it. */
+    z-index: 8;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 10px;
+    /* Same chrome as the settings panel — border on all four sides and a real
+       shadow. It takes layout width, but it is still a surface resting over
+       the app rather than a region welded into the frame. */
     background: var(--surface-raised);
-    /* Border on all four sides and a real shadow — a floating surface has to
-       read as lifted off the background, or the inset just looks like a gap. */
     border: 1px solid var(--border-strong);
     border-radius: 14px;
     box-shadow: var(--shadow-float);
     font-family: var(--font-outside);
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text);
+    overflow: hidden;
+  }
+
+  .cwd-panel-title {
+    /* The path, elided from the left: the tail is the part that identifies
+       where you are, and a drive letter is the part nobody is reading. */
+    direction: rtl;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-strong);
+    color: var(--text-ghost-weak);
+    font-family: var(--font-inside);
+  }
+
+  .cwd-panel-list {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    scrollbar-width: none;
   }
 
-  .settings-title {
-    margin-bottom: 18px;
-    color: var(--accent);
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-  }
-
-  /* The X and the swatches share a row: both are pickers of a fixed, small set,
-     and stacking them made the panel a column of headings. Each sits in its own
-     titled card, so the two pickers read as two things rather than as one wide
-     control with a colour block stuck to its side. The X gets the wider column
-     because it is square and carries four labels; the swatches only need three
-     across. */
-  .settings-top {
-    display: grid;
-    grid-template-columns: 1.35fr 1fr;
-    align-items: start;
-    gap: 14px;
-    margin-bottom: 14px;
-  }
-
-  .settings-card {
-    padding: 12px;
-    background: var(--surface-inset);
-    border: 1px solid var(--border-strong);
-    border-radius: 12px;
-  }
-
-  .card-title {
-    margin: 0 0 10px;
-    color: var(--accent);
-    font: inherit;
-    font-size: 11px;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-  }
-
-  .card-title-center {
-    text-align: center;
-    color: var(--text-ghost);
-  }
-
-  /* Four quadrants around one centre, with the X drawn through them. A quadrant
-     rather than a triangle wedge so every label sits horizontally at its own
-     outer corner — the triangle version had to turn two of the four labels on
-     their side to fit, which made the two horizontal ones read as the real
-     options and the vertical ones as an afterthought. */
-  .font-x {
-    position: relative;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr;
-    width: 100%;
-    aspect-ratio: 1;
-  }
-
-  /* Two rounded bars crossed at the centre. Decoration, and `pointer-events`
-     off so it can sit over the wedges without stealing their clicks. */
-  .x-mark {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-  }
-
-  .x-mark::before,
-  .x-mark::after {
-    content: "";
-    position: absolute;
-    top: 8%;
-    left: 50%;
-    width: 26px;
-    height: 84%;
-    margin-left: -13px;
-    border: 1px solid var(--border-strong);
-    border-radius: 999px;
-  }
-
-  .x-mark::before {
-    transform: rotate(45deg);
-  }
-
-  .x-mark::after {
-    transform: rotate(-45deg);
-  }
-
-  .wedge {
-    position: relative;
+  .cwd-row {
     display: flex;
-    padding: 4px;
-    background: transparent;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .cwd-twist {
+    flex: none;
+    width: 14px;
+    height: 18px;
+    padding: 0;
     border: 0;
+    background: none;
+    color: var(--text-ghost-weak);
     font: inherit;
-    font-size: 11px;
-    color: var(--text-muted);
+    line-height: 1;
     cursor: pointer;
-    transition: color 0.25s ease;
+    /* One property, two states, driven by a class the template already
+       toggles — the same case the raw/block crossfade is a CSS transition for.
+       Nothing else writes this element's transform, so GSAP has nothing to own
+       here and a tween would need a reactive effect to drive it. */
+    transition: transform 0.15s ease, color 0.15s ease;
   }
 
-  .wedge:hover {
-    color: var(--text);
-  }
-
-  .wedge.active {
+  .cwd-twist.open {
+    transform: rotate(90deg);
     color: var(--accent-text);
   }
 
-  /* The mark of the selection is a blob on the X's arm, not a fill of the
-     quadrant: the quadrant is the hit area, the arm is what the reader is
-     picking. Positioned toward the centre of its own corner's arm, which is why
-     each quadrant places it on a different pair of edges. */
-  .wedge::after {
-    content: "";
-    position: absolute;
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    background: var(--accent);
-    opacity: 0;
-    transition: opacity 0.25s ease;
+  .cwd-twist.empty {
+    cursor: default;
   }
 
-  .wedge.active::after {
-    opacity: 1;
-  }
-
-  .wedge-tl {
-    align-items: flex-start;
-    justify-content: flex-start;
-  }
-
-  .wedge-tl::after {
-    right: 12%;
-    bottom: 12%;
-  }
-
-  .wedge-tr {
-    align-items: flex-start;
-    justify-content: flex-end;
-  }
-
-  .wedge-tr::after {
-    left: 12%;
-    bottom: 12%;
-  }
-
-  .wedge-bl {
-    align-items: flex-end;
-    justify-content: flex-start;
-  }
-
-  .wedge-bl::after {
-    right: 12%;
-    top: 12%;
-  }
-
-  .wedge-br {
-    align-items: flex-end;
-    justify-content: flex-end;
-  }
-
-  .wedge-br::after {
-    left: 12%;
-    top: 12%;
-  }
-
-  /* The label sits above its own blob, or the accent fill swallows it. */
-  .wedge .settings-option-label {
-    position: relative;
-    z-index: 1;
-  }
-
-  /* Both switches live in one card — they are the same kind of question asked
-     twice, and two separate bordered rows made the panel a stack of frames. */
-  .switch-card {
-    display: grid;
-    gap: 14px;
-  }
-
-  /* Name above, the two states either side of the knob. Centred, because
-     neither end is the default and an off-centre one would say otherwise. */
-  .switch-row {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 14px;
-    width: 100%;
-    padding: 0;
-    background: none;
-    border: 0;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-  }
-
-  .switch-side {
-    flex: 1;
-    color: var(--text-ghost);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    transition: color 0.25s ease;
-  }
-
-  /* The left state reads toward the knob and the right one away from it, so the
-     pair reads as one control rather than two labels that happen to be near a
-     switch. */
-  .switch-side:first-child {
-    text-align: right;
-  }
-
-  .switch-side:last-child {
-    text-align: left;
-  }
-
-  /* The current state, marked by colour and an underline rather than by weight:
-     a weight change reflows the row every time the switch is flipped. */
-  .switch-side.on {
-    color: var(--text);
-  }
-
-  .switch-side.on .settings-option-label {
-    border-bottom: 1px solid var(--accent);
-    padding-bottom: 2px;
-  }
-
-  .switch-row:hover .switch {
-    border-color: var(--accent-border-soft);
-  }
-
-  .switch {
-    flex: none;
-    width: 38px;
-    height: 20px;
-    padding: 2px;
-    box-sizing: border-box;
-    background: var(--surface-base);
-    border: 1px solid var(--border-strong);
-    border-radius: 999px;
-    transition: background 0.25s ease, border-color 0.25s ease;
-  }
-
-  .switch.on {
-    background: var(--accent-surface);
-    border-color: var(--accent);
-  }
-
-  .switch-knob {
+  .cwd-entry {
     display: block;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: var(--text-faint);
-    /* A CSS transition, not a tween: one property, two states, driven by a class
-       the template already toggles — the same reasoning that leaves the
-       raw/block crossfade and the hover ring to CSS. ANIMATION.md's ban is on
-       CSS *keyframe* animations for stateful things. */
-    transition: transform 0.25s ease, background 0.25s ease;
-  }
-
-  .switch.on .switch-knob {
-    transform: translateX(18px);
-    background: var(--accent);
-  }
-
-  /* One character of a toggle's label, mid-flicker. The RGB split is static for
-     the 0.18s the wrapper exists — the motion is the stepped `x` GSAP writes,
-     and `text-shadow` is not a value worth tweening (see `glitchLabel`). The
-     wrapper is torn down on completion, so this only ever matches during it. */
-  /* `:global` is load-bearing, not defensive: these spans are built in JS, so
-     they never carry Svelte's scoping class and a scoped selector would miss
-     them entirely — silently, with the flicker reduced to a stepped nudge. */
-  :global(.glitch-char) {
-    display: inline-block;
-    text-shadow:
-      -1.5px 0 var(--err),
-      1.5px 0 var(--accent);
-  }
-
-  /* A grid, not a row: eight accents in one line either overflow the panel or
-     shrink each swatch below the size at which its colour is legible. Three
-     columns keeps them at a readable size beside the square X. */
-  .swatch-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-    justify-items: center;
-  }
-
-  /* Round, like the blob on the font X — the two pickers are the same gesture,
-     so they get the same mark. */
-  .swatch {
-    width: 30px;
-    height: 30px;
-    padding: 0;
+    /* The row is a flex line now, so the name takes what the twisty leaves
+       rather than the panel's full width. */
+    flex: 1;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 3px 6px;
     border: 0;
-    border-radius: 50%;
+    border-radius: 6px;
+    background: none;
+    font: inherit;
+    font-family: var(--font-inside);
+    color: var(--text);
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     cursor: pointer;
-    /* The selected ring is drawn with box-shadow, not a border — a border would
-       resize the swatch and shift the whole grid on every pick. */
-    box-shadow: none;
-    transition: box-shadow 0.25s ease;
+    /* Ambient tier — a hover is not an action, so it never tweens. */
+    transition: background 0.15s ease;
   }
 
-  .swatch.active {
-    box-shadow: 0 0 0 3px var(--surface-inset), 0 0 0 4px var(--text);
+  .cwd-entry:hover,
+  .cwd-entry:focus-visible,
+  .cwd-twist:not(.empty):hover {
+    background: var(--surface-inset);
   }
 
-  .settings-foot {
-    margin-top: 14px;
+  .cwd-entry.dir {
+    color: var(--accent-text);
+  }
+
+  .cwd-panel-empty {
+    padding: 3px 6px;
     color: var(--text-ghost-weak);
-    font-size: 11px;
   }
   /* #endregion */
+
 
   /* Deliberately unstyled beyond legibility — it is a diagnostic, not chrome,
      and it should never be mistaken for part of the app in a screenshot. */
@@ -4448,6 +5064,31 @@
     visibility: hidden;
   }
 
+  /* The focused block: a rail down its left edge, the same affordance an editor
+     uses for the active line.
+
+     Not a border colour, and that is not a style preference — the hover ring
+     tweens `border-color` as an *inline* style, which outranks any rule here
+     for the rest of that block's life the moment a pointer has crossed it. Not
+     the ring's own gradient either: that one means "the pointer is here" and
+     would be saying two things at once. Focus lasts, so it also cannot animate
+     — a state that persists has nothing to animate towards. */
+  .block.focused::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    /* Clear of the corner radius at both ends rather than running into it. */
+    top: 10px;
+    bottom: 10px;
+    width: 2px;
+    border-radius: 2px;
+    /* Above the head, which is pulled out to the block's edges and paints its
+       own background over anything at the block's inner boundary. */
+    z-index: 2;
+    background: var(--accent);
+    pointer-events: none;
+  }
+
   /* `:global` because `hot` is set by the delegated pointer handler rather than
      by the template, so Svelte cannot see it referenced and would prune these.
 
@@ -4574,30 +5215,10 @@
     background: var(--border);
   }
 
-  .block-head.live {
-    padding: 2px 2px;
-    /* Outside a container, so it follows the outside slot rather than the
-       block chrome it visually rhymes with. */
-    font-family: var(--font-outside);
-    line-height: 18px;
-  }
-
-  /* The uncapped copy of the input: the bar stops at three rows, this shows the
-     whole command however long it runs. `pre-wrap` belongs on the text span and
-     never on the line's container — on the container it also preserves the
-     template's own newline and indentation, which is what knocked this line out
-     of alignment with the bar below it. */
-  .live-text {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
   /* Mirrored, not authoritative — this is a reflection of xterm's cursor row,
      and it stops existing the moment Enter commits it to a real block. Dull
      translucent white says that: present and readable, visibly not yet the
-     record. `.block-command` below is the same text after it commits, at full
-     weight. Same treatment in the docked bar, since it is the same text. */
-  .live-text,
+     record. `.block-command` is the same text after it commits, at full weight. */
   .input-text {
     color: var(--text-ghost);
   }
@@ -4765,6 +5386,40 @@
     color: var(--err);
   }
 
+  /* Sits in the result line's slot and must not read as one: this is chrome
+     telling the reader how to operate the thing that is running, not something
+     the command said. Dimmer than any output, and never tinted with a status
+     colour, because it is not reporting one. */
+  .block-running {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-ghost-faint);
+  }
+
+  /* The track. Fixed width so the row's layout does not depend on the bar being
+     there — the hint beside it sits in the same place either way. */
+  .run-bar {
+    position: relative;
+    flex: none;
+    width: 48px;
+    height: 2px;
+    overflow: hidden;
+    border-radius: 1px;
+    background: rgba(244, 244, 245, 0.08);
+  }
+
+  .run-bar-head {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 25%;
+    border-radius: inherit;
+    background: var(--accent);
+    opacity: 0.55;
+  }
+
   .notice {
     position: absolute;
     top: 10px;
@@ -4787,7 +5442,7 @@
        the PTY's rows. See `growUpward`. */
     position: absolute;
     left: 12px;
-    right: 12px;
+    right: calc(12px + var(--panel-open-w));
     bottom: 12px;
     /* Above the scrollbar overlay (5), below the settings panel (30) and the
        toast (10) — output scrolls under the bar, chrome still lands on top. */
@@ -4813,9 +5468,19 @@
      bar as it grows to two and three rows. */
   .suggest {
     position: absolute;
+    /* Centred over the bar by the two insets plus `auto` margins, never by a
+       translate: the enter and leave tweens own this element's transform, and a
+       `translateX(-50%)` in the stylesheet is the first thing GSAP overwrites
+       when it writes `y`. An absolutely positioned box with both insets, a
+       width, and auto margins centres in the box they describe — same result,
+       and it leaves the transform free. */
     left: 12px;
+    right: calc(12px + var(--panel-open-w));
+    margin-inline: auto;
     bottom: calc(12px + var(--input-h, 44px) - 1px);
-    width: calc((100% - 24px) * 0.6);
+    /* Centred in the band the bar actually occupies, so it stays centred over
+       the bar rather than over the window once the panel has taken a slice. */
+    width: calc((100% - 24px - var(--panel-open-w)) * 0.6);
     height: calc(var(--input-h, 44px) * 0.9);
     /* Same layer as the bar — they are one control. */
     z-index: 6;
@@ -4863,6 +5528,15 @@
     flex: none;
   }
 
+  /* Both are clipped by the handoff as the mark sweeps over them, and a
+     `clip-path` on a non-replaced inline box has no defined box to clip to.
+     `inline-block` changes no metric on either — one is a path, the other three
+     characters — and is what makes the erase possible. */
+  .cwd-text,
+  .block-sep {
+    display: inline-block;
+  }
+
   /* The ghost line is one uniform dull white — path, separator and mirrored
      text all read as the same not-yet-committed thing. The `>` is the only
      accent on it: it marks where the line begins and it is the one part that
@@ -4876,6 +5550,24 @@
     color: var(--text-ghost-weak);
   }
 
+  /* The inline completion. Dimmer than the mirrored input, which is itself
+     dimmer than a committed command — three weights for three degrees of
+     "this is real": typed and run, typed and not yet run, not typed at all.
+     No animation: it changes on every keystroke, and something that flickers
+     under the caret is unreadable at typing speed.
+
+     It renders *inside* `.input-text`, which is the box that wraps. As a flex
+     sibling it would be its own item, with the bar's 8px gap in front of it and
+     its own line to wrap onto. The cost of being inside is that `startHandoff`
+     has to take its width back off everything it measures from that box, and
+     drop it from the frozen copy the way it already drops the caret — text
+     nobody typed is not part of the gesture that hands typed text to a block. */
+  .ghost-suggest {
+    color: var(--text-ghost-weak);
+    white-space: pre;
+    pointer-events: none;
+  }
+
   .ghost-mark {
     color: var(--accent);
     /* The handoff translates this on submit, and a transform does not apply to
@@ -4885,7 +5577,6 @@
   }
 
   .input-text {
-    /* Colour is set with .live-text above — same text, same treatment. */
     /* `min-height` keeps the line's box real while the input is still empty. */
     min-height: 18px;
     white-space: pre-wrap;

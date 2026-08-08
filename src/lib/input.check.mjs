@@ -10,6 +10,8 @@ import {
   segments,
   step,
   tokenAt,
+  unquote,
+  wordSuggestions,
 } from "./input.js";
 
 // ── quoting ────────────────────────────────────────────────────────────────
@@ -91,6 +93,65 @@ assert.equal(completions(entries, "s", "src/", false)[0].text, "src/src/");
 // so the next Tab can strip the quote and carry on into the directory.
 assert.equal(completions(entries, "s", "src\\", true)[0].text, '"src\\src\\"');
 assert.deepEqual(completions(entries, "zz", "", false), []);
+
+// ── unquoting ──────────────────────────────────────────────────────────────
+// Round-trips whatever `quotePath` produced, which is the only contract that
+// matters — `open` acts on the same text a drop or a Tab completion wrote.
+assert.equal(unquote(quotePath("my file.md", true)), "my file.md");
+assert.equal(unquote(quotePath('a"b c', true)), 'a"b c');
+assert.equal(unquote("README.md"), "README.md");
+assert.equal(unquote("  README.md  "), "README.md");
+assert.equal(unquote("'my file.md'"), "my file.md");
+// A lone quote is not a pair and is left alone: mangling it would send a
+// half-typed path somewhere instead of failing visibly.
+assert.equal(unquote('"half'), '"half');
+assert.equal(unquote('"'), '"');
+assert.equal(unquote(""), "");
+// Quotes in the middle are shell syntax, not a wrapper — untouched.
+assert.equal(unquote('a"b"c'), 'a"b"c');
+
+// ── word suggestions (history, commands, verbs) ────────────────────────────
+const CMDS = ["git", "npm", "cargo", "cd"];
+const SUBS = ["status", "stash", "install", "exec", "exec"];
+const texts = (/** @type {{text:string}[]} */ s) => s.map((i) => i.text);
+
+// History wins over everything: it is a line this user actually typed. It
+// replaces from column 0, not from the token — the whole line is the answer.
+const h = wordSuggestions("git s", 5, ["git stash pop", "git status"], CMDS, SUBS);
+assert.deepEqual(texts(h).slice(0, 2), ["git stash pop", "git status"]);
+assert.equal(h[0].start, 0);
+// A fresh session has no history, and this is the case that made the feature
+// look broken — without the command list there is nothing to show on day one.
+assert.deepEqual(texts(wordSuggestions("gi", 2, [], CMDS, SUBS)), ["git"]);
+assert.deepEqual(texts(wordSuggestions("git s", 5, [], CMDS, SUBS)), ["status", "stash"]);
+// A verb replaces the second word only, so it starts where that word starts.
+assert.equal(wordSuggestions("git s", 5, [], CMDS, SUBS)[0].start, 4);
+// The subcommand list carries honest duplicates; the strip must not.
+assert.deepEqual(texts(wordSuggestions("git e", 5, [], CMDS, SUBS)), ["exec"]);
+// An exact match is not a completion — there is nothing left to add.
+assert.deepEqual(wordSuggestions("git", 3, [], CMDS, SUBS), []);
+assert.deepEqual(wordSuggestions("", 0, ["git status"], CMDS, SUBS), []);
+// A trailing space is not a prefix. Offering the first verb in the list there
+// would be a guess, not a completion — paths cover that position instead.
+assert.deepEqual(wordSuggestions("git ", 4, [], CMDS, SUBS), []);
+// Unknown command, or past the second word: no verbs. The lists know verbs,
+// not arguments, and everything past word two is `completions`' job.
+assert.deepEqual(wordSuggestions("frobnicate s", 12, [], CMDS, SUBS), []);
+assert.deepEqual(wordSuggestions("git status --sh", 15, [], CMDS, SUBS), []);
+// History still applies to a line the curated lists could never produce.
+assert.deepEqual(
+  texts(wordSuggestions("git status --sh", 15, ["git status --short"], CMDS, SUBS)),
+  ["git status --short"],
+);
+
+// ── `..` is a completion, not a listing ────────────────────────────────────
+// It is in no directory listing and is the one directory everybody needs. Its
+// absence is why "how do I go up a folder" had no answer on screen.
+assert.equal(completions(entries, "", "", false)[0].text, "../");
+assert.equal(completions(entries, ".", "", true)[0].text, '"..\\"');
+assert.equal(completions(entries, "..", "", false)[0].text, "../");
+// It ranks with the directories and does not gatecrash an unrelated match.
+assert.ok(!texts(completions(entries, "r", "", false)).includes("../"));
 
 // ── selection wrapping ─────────────────────────────────────────────────────
 assert.equal(step(0, -1, 3), 2);

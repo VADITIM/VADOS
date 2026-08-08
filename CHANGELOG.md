@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.0
+
+### Output
+
+- One reveal for all output: bars sweep the coloured tokens in tier order, a character wave rises under the prose between them, played as content lands. The typewriter is deleted; it made one command's output look like two different products depending on where a PTY chunk boundary fell.
+- The reveal setting is `Reveal` / `Instant`; the old `typewriter` value falls back to the default.
+- Output that is genuinely markdown is read as markdown instead of guessed at, on evidence only: a reader command printing a `.md` file, or the text clearing a high bar on its own.
+- A block takes its structure from the buffer only once the stream goes quiet (80ms, capped at 240ms), and its first paint waits up to 1.5s for the same. A growing buffer's structure is not final, so `ping`'s first replies used to mount as prose and be thrown away.
+- A block's first content grows the box into it over 0.45s instead of snapping everything below it under the reader.
+- A running command shows how to get out of it where the result line will go: pager keys when a pager is waiting, otherwise `ctrl+c stops`. One that has produced nothing yet shows an indeterminate bar.
+- A list row animates when it arrives, and rises as one piece rather than character-waving. The reveal was on the `<ul>`, which fires once, so rows appended later got nothing.
+- Long output is much faster. Text is read out of xterm's buffer from where the last read stopped rather than from the top, off-screen elements are shown without being animated or split, and a code block over 20k characters renders untinted. `git --no-pager diff` took seconds against a raw terminal's instant.
+- On submit the `>` mark carries the line into the block and brings the prompt back on the way home.
+
+### Parser
+
+- `diff --git a/x b/x` is one code run again; `diff` was missing from the command list.
+- Text that already contains backticks is no longer marked up a second time inside them.
+- A blank line inside a diff hunk no longer ends the fence. A diff's blank context line is a single space.
+- A run of `warning:` lines is one node per line again, instead of collapsing into a single twelve-row heading.
+- A body under a heading is a list at any length, including one line. The old length test asked how a *finished* body looks, of one still arriving.
+
+### Input bar
+
+- Inline ghost completion: the rest of the line appears greyed after the caret, Tab or → accepts. Four sources in order, a line run earlier this session, a command name, a subcommand verb, then a path for every word after the first. The path source is what makes it survive the first space.
+- The suggestion strip and the ghost are one thing with two views. ↑↓ move the selection and are the only thing that does.
+- **Enter always runs the line.** Only a strip that was summoned, by a drop, or by Tab with nothing matching. ↑↓ at an empty prompt still reach the shell's own history.
+- Accepting replaces the whole word rather than appending, which fixes the case: `cla` used to complete to `claUDE.md` and send exactly that to the shell.
+- `..` completes like any other directory, so `cd ..` is one Tab away.
+- The strip is centred over the input bar rather than flush left.
+- The prompt no longer renders twice, the scroll stream's copy of the live input line is gone.
+- Directory listings for completion are cached for one prompt cycle only: the command that just ran is the thing that creates and deletes files.
+
+### Navigation
+
+- A past block can be selected: Ctrl+Up/Down step through the scrollback, a click selects, Esc deselects, and a rail marks it. Chords rather than bare arrows, which belong to the shell's history and the strip.
+- Ctrl+Shift+C copies the selected block, Ctrl+Shift+M copies it as markdown.
+- `open <path>` opens a file or folder in whatever the system opens it with, resolved against the prompt's cwd. It never reaches the shell.
+- Ctrl+B toggles a folder panel on the right, as a tree. It takes width rather than covering: the scrollback, input bar and strip narrow, and the PTY's column count follows, so the shell wraps where VAD/OS draws it. Costs readline's backward-char; raw mode keeps it.
+- A folder opens in place on a click; shift+click replaces the prompt line with `cd <path>`. `..` at the top goes up. Clicking a file offers the same ways to run it that a dropped file gets.
+- A file can be dragged out of the panel into any other application. A real OS drag, not an HTML5 one, a webview drag carries `text/plain` and every other app wants a file, which is what the stop cursor was. Always `copy`, never `move`: the panel cannot move, rename or edit anything.
+- Nothing in the panel runs a command. It names a path; Enter stays the user's to press.
+
+### Config
+
+- Settings persist to `config.toml` in the platform config directory (`%APPDATA%\vados` / `~/.config/vados`), replacing the `localStorage` placeholder.
+- External edits to the file apply without a restart. A file that exists but does not parse is left alone and the session runs on defaults.
+- Startup directory setting, with a native folder picker. `~` is expanded before the PTY spawn, which does not shell-expand.
+- Start as administrator, Unix only — wraps the next spawned shell in `sudo -E` and leaves the GUI unprivileged. Absent on Windows, where elevation has to be the whole process. Both are next-launch settings; restarting a live session is not the terminal's call.
+
 ## 0.3.0
 
 ### Commands

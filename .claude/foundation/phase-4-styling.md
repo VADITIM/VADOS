@@ -1,6 +1,6 @@
 # Phase 4 — Styling (SCSS)
 
-**Status: token layer and accent system landed. One item outstanding — the bundled sans font.**
+**Status: token layer and accent system landed and confirmed on screen (2026-08-07). One item outstanding — the bundled sans font.** The accent palette therefore counts as settled by use rather than by proposal; see [../tasks.md](../tasks.md).
 
 ## Status / Learned
 

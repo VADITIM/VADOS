@@ -76,6 +76,30 @@ export function labelTier(classList) {
 }
 
 /**
+ * Whether an element's own grey prose may be split into characters.
+ *
+ * A list row may not. **The row is a list's reveal unit** — one action per
+ * `<li>`, not one on the `<ul>` — because a list grows a row at a time and an
+ * element animates once, on the chunk it mounted in. So the row is what
+ * arrives, and the row is what rises: as one piece, the same gesture at the
+ * coarsest resolution a live element or an over-long code block already gets
+ * (ANIMATION.md, *Live output is not split*).
+ *
+ * Character-splitting it instead would put a stagger inside a row while the
+ * rows themselves are already arriving one at a time, which is two waves
+ * crossing each other — and at `npm ls` lengths, hundreds of splits for text
+ * that reads as a table.
+ *
+ * Any labels inside a row still sweep. This decides the prose and nothing else.
+ *
+ * @param {Iterable<string>} classList
+ * @returns {boolean}
+ */
+export function splittable(classList) {
+  return !new Set(classList).has("md-row");
+}
+
+/**
  * Group elements into label tiers, dropping empty ones.
  *
  * Empty tiers are dropped rather than held open on purpose: a line with no

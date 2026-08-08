@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if git status --porcelain -- src src-tauri | grep -q . && ! git status --porcelain -- .claude/tests.md | grep -q .; then printf '%s' '{\"decision\":\"block\",\"reason\":\"Behaviour under src/ or src-tauri/ changed and .claude/tests.md was not updated. Add a dated section at the top listing exactly what the user has to check on screen: one unchecked box per check, each naming the command to run and what should happen. Cover what this turn changed and nothing else. Then stop.\"}'; fi",
+            "statusMessage": "Checking tests.md"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -58,6 +58,13 @@ function tone(text) {
 // only whether a line reads as code rather than prose. Cheap and already
 // right for diffs, stack traces, JSON, `tree` output.
 const SHELL_PROMPT = /^[$>]\s/;
+
+/**
+ * A single-line label: a colon with text after it on the same line, e.g.
+ * `Usage: run with --foo` or `warning: disk almost full`. Used twice — to find
+ * one, and to know where the one before it has to stop.
+ */
+const LABEL_LINE = /^\s*([^\n:]+:\s+\S.*)$/;
 // unified-diff line markers: `diff --git`, `--- a/`, `+++ b/`, `@@ -1,2 +1,2 @@`,
 // and the leading +/- on changed lines. None of these are symbol-dense enough
 // to trip the density check below on their own.
@@ -101,7 +108,7 @@ function isCodeLine(line) {
  * Longer names come before the prefixes they contain (`apt-get` before `apt`),
  * since alternation takes the first match that fits.
  */
-const COMMANDS = [
+export const COMMAND_NAMES = [
   "git", "gh", "npm", "npx", "pnpm", "yarn", "bun", "deno", "node",
   "cargo", "rustup", "rustc", "tauri", "tsc", "eslint", "prettier",
   "vite", "vitest", "jest", "playwright", "svelte-kit",
@@ -110,11 +117,13 @@ const COMMANDS = [
   "ssh", "scp", "rsync", "curl", "wget", "tar", "unzip",
   "systemctl", "journalctl", "apt-get", "apt", "pacman", "yay", "paru",
   "brew", "winget", "choco", "scoop", "sudo",
-  "chmod", "chown", "grep", "sed", "awk", "mkdir", "rmdir",
+  "chmod", "chown", "grep", "sed", "awk", "mkdir", "rmdir", "diff",
   "powershell", "pwsh", "cmd", "bash", "zsh", "fish",
   "robocopy", "xcopy", "tasklist", "taskkill", "ipconfig", "ifconfig",
   "netstat", "tracert", "cls", "ls", "cd", "rm", "cp", "mv", "ps", "df", "du",
-].join("|");
+];
+
+const COMMANDS = COMMAND_NAMES.join("|");
 
 /**
  * Subcommand verbs, as a whitelist rather than a list of English words to
@@ -128,7 +137,7 @@ const COMMANDS = [
  * shared across almost all of them. A subcommand not listed here degrades to
  * the command name alone plus separately-tinted flags — worse, never wrong.
  */
-const SUBCOMMANDS = [
+export const SUBCOMMAND_NAMES = [
   "install", "uninstall", "add", "remove", "rm", "update", "upgrade", "sync",
   "run", "exec", "start", "stop", "restart", "build", "rebuild", "test",
   "dev", "serve", "preview", "watch", "check", "lint", "format", "fmt",
@@ -141,7 +150,9 @@ const SUBCOMMANDS = [
   "get", "set", "list", "ls", "search", "info", "why", "audit", "cache",
   "login", "logout", "version", "help", "images", "compose", "ps", "up",
   "down", "exec", "cp", "mv",
-].join("|");
+];
+
+const SUBCOMMANDS = SUBCOMMAND_NAMES.join("|");
 
 /**
  * A single command argument: a flag, a `<placeholder>`, an `[optional]` group,
@@ -188,7 +199,17 @@ const COMMAND_RUN = new RegExp(
 
 const CODE_TOKEN = new RegExp(
   [
-    // First: a command run absorbs its own flags and paths, so they are never
+    // Text that already marks itself as code. A pair of backticks is the one
+    // piece of markdown this parser reads in plain output, and it is read for a
+    // defensive reason rather than a decorative one: without it the rules below
+    // ran *inside* an already-backticked run and produced nested markers —
+    // `` `path::`app_config_dir()`` `` — which is neither what the source said
+    // nor valid anything. A pair is required, and it may not cross a line, so a
+    // stray backtick in output cannot swallow the rest of a paragraph.
+    // The backticks are consumed with the match; `inlineParts` hands back only
+    // what was between them.
+    /`[^`\n]+`/,
+    // Then: a command run absorbs its own flags and paths, so they are never
     // matched out from under it by the per-token rules below.
     COMMAND_RUN,
     /https?:\/\/\S*[\w/#=&-]/,
@@ -226,18 +247,27 @@ function inlineKind(text) {
   return null;
 }
 
-/** @param {string} text @returns {TextPart[]} */
-function inlineParts(text) {
+/**
+ * @param {string} text
+ * @param {RegExp} [re] Which shapes count as code. Defaults to the shape
+ *   heuristics; markdown passes its own, much narrower, set.
+ * @returns {TextPart[]}
+ */
+function inlineParts(text, re = CODE_TOKEN) {
   /** @type {TextPart[]} */
   const parts = [];
   let last = 0;
-  for (const m of text.matchAll(CODE_TOKEN)) {
+  for (const m of text.matchAll(re)) {
     if (m.index > last) parts.push({ code: false, text: text.slice(last, m.index) });
     // The key is left off entirely for a plain code token rather than set to
     // null: every part is compared structurally in the self-check, and a key
     // that is present-but-empty is noise in every one of those expectations.
-    const kind = inlineKind(m[0]);
-    parts.push(kind ? { code: true, text: m[0], kind } : { code: true, text: m[0] });
+    // A backticked run keeps its contents and loses its markers: the backticks
+    // were the source saying "this is code", and the chip the renderer draws
+    // says the same thing without them.
+    const token = m[0].startsWith("`") ? m[0].slice(1, -1) : m[0];
+    const kind = inlineKind(token);
+    parts.push(kind ? { code: true, text: token, kind } : { code: true, text: token });
     last = m.index + m[0].length;
   }
   if (last < text.length) parts.push({ code: false, text: text.slice(last) });
@@ -270,6 +300,9 @@ const CODE_SPAN = new RegExp(
   "g",
 );
 
+/** Longest code block that still gets its tokens tinted. See `codeSpans`. */
+const CODE_SPAN_MAX = 20000;
+
 /**
  * Split a code block into tinted and untinted runs.
  *
@@ -282,6 +315,15 @@ const CODE_SPAN = new RegExp(
  * @returns {CodeSpan[]}
  */
 export function codeSpans(text) {
+  // ponytail: past this, the block is one untinted span.
+  //
+  // Tinting is per token, and a token is a DOM element — a whole-repo `git
+  // diff` is one code node of several hundred kilobytes, which is tens of
+  // thousands of elements for colour on flags nobody is reading at that
+  // length. The block still renders, still scrolls, still copies; it is only
+  // uncoloured. Raise this the day a real virtualised renderer lands and the
+  // element count stops being paid all at once.
+  if (text.length > CODE_SPAN_MAX) return [{ token: null, text }];
   /** @type {CodeSpan[]} */
   const spans = [];
   let last = 0;
@@ -298,11 +340,160 @@ export function codeSpans(text) {
   return spans.length ? spans : [{ token: null, text }];
 }
 
+// ---------------------------------------------------------------------------
+// Real markdown.
+//
+// Everything above this line is *guessing* — it reads structure out of the
+// shape of shell output, because shell output carries no structure of its own.
+// A markdown file does. Running the guesser over it is strictly worse than
+// reading what it says: `Note: see below` becomes a heading the author never
+// wrote, `right-click` becomes a CLI flag, and a fence the author *did* write
+// gets re-derived from symbol density instead of being read.
+//
+// So when the source is genuinely markdown, none of the heuristics run. The
+// syntax is the evidence and it is taken at face value.
+
+/** A `.md`-ish path, ending at whitespace or a quote/punctuation boundary. */
+const MD_FILE = /\.(?:md|markdown|mdx)(?=$|["'\s:,)\]])/i;
 /**
+ * A command that prints a file rather than operating on one. Required in
+ * addition to the path: `git diff README.md` names a `.md` file and its output
+ * is a diff, not markdown.
+ */
+const MD_READER = /(?:^|[|;&]\s*)\s*(?:cat|bat|type|head|tail|more|less|glow|mdcat|Get-Content|gc)\b/i;
+
+const ATX = /^ {0,3}(#{1,6})[ \t]+(\S.*?)[ \t]*#*$/;
+const FENCE = /^ {0,3}(?:```|~~~)/;
+const MD_BULLET = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+(\S.*)$/;
+
+/**
+ * Is this really markdown?
+ *
+ * Two kinds of evidence, both deliberately hard to trip by accident:
+ *
+ *  - the command printed a `.md` file — the strongest signal there is, and the
+ *    reason it also has to be a *reader* command is that naming a file is not
+ *    the same as printing one;
+ *  - the text itself clears a high bar: a closed fence, or two ATX headings of
+ *    which at least one is `##` or deeper. Bare `#` alone is not enough — a
+ *    shell script or Dockerfile is nothing but `# comment` lines, and every one
+ *    of them would otherwise read as a level-1 heading.
+ *
+ * @param {string} buffer
+ * @param {string} [command] The command line that produced it.
+ */
+export function isMarkdown(buffer, command = "") {
+  if (MD_FILE.test(command) && MD_READER.test(command)) return true;
+  let fences = 0;
+  let headings = 0;
+  let deep = false;
+  for (const line of buffer.split("\n")) {
+    if (FENCE.test(line)) fences++;
+    const h = ATX.exec(line);
+    if (h) {
+      headings++;
+      if (h[1].length > 1) deep = true;
+    }
+  }
+  return fences >= 2 || (headings >= 2 && deep);
+}
+
+/**
+ * Markdown's own inline code: a backtick pair, and nothing else. None of the
+ * flag/path/command shapes above apply here — in markdown, code is code because
+ * the author said so.
+ */
+const MD_INLINE = /`[^`\n]+`|https?:\/\/\S*[\w/#=&-]/g;
+
+/**
+ * Reads markdown as written. Same nodes as `parse`, so the renderer, the
+ * clipboard and the export path do not know which one produced them.
+ *
+ * ponytail: block constructs only — headings, fences, lists, paragraphs.
+ * Emphasis, tables, and `[label](url)` stay literal text, because `Node` has no
+ * part shape that carries them. Add them to `Node` first if they matter.
+ *
  * @param {string} buffer
  * @returns {Node[]}
  */
-export function parse(buffer) {
+export function parseMarkdown(buffer) {
+  const lines = buffer.split("\n");
+  /** @type {Node[]} */
+  const nodes = [];
+  /** @type {string[]} */
+  let para = [];
+
+  const flush = () => {
+    const text = para.join("\n").trim();
+    if (text) nodes.push({ kind: "text", parts: inlineParts(text, MD_INLINE) });
+    para = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (FENCE.test(line)) {
+      flush();
+      // Closed by its own marker, or by the end of the buffer — a fence still
+      // streaming in is a fence, and refusing to render it until its closer
+      // arrives would make a `cat` of a long file flicker between two layouts.
+      const marker = line.trim().slice(0, 3);
+      /** @type {string[]} */
+      const body = [];
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim().startsWith(marker)) body.push(lines[j++]);
+      const text = body.join("\n");
+      if (text) nodes.push({ kind: "code", text, spans: codeSpans(text) });
+      i = j;
+      continue;
+    }
+
+    const h = ATX.exec(line);
+    if (h) {
+      flush();
+      // `Node` has two heading levels and markdown has six. `#`/`##` are the
+      // document's sections; anything deeper is a label within one.
+      nodes.push({
+        kind: "heading",
+        level: h[1].length <= 2 ? 2 : 3,
+        text: h[2],
+        tone: tone(h[2]),
+      });
+      continue;
+    }
+
+    if (MD_BULLET.test(line)) {
+      flush();
+      /** @type {string[]} */
+      const items = [];
+      let j = i;
+      for (let m; j < lines.length && (m = MD_BULLET.exec(lines[j])); j++) items.push(m[1].trim());
+      nodes.push({ kind: "list", items });
+      i = j - 1;
+      continue;
+    }
+
+    if (line.trim() === "") flush();
+    else para.push(line);
+  }
+
+  flush();
+  return nodes;
+}
+
+/**
+ * @param {string} buffer
+ * @param {string} [command] The command line that produced this output. Only
+ *   used as evidence that the output is a markdown file being printed.
+ * @returns {Node[]}
+ */
+export function parse(buffer, command = "") {
+  if (isMarkdown(buffer, command)) return parseMarkdown(buffer);
+  return parseShellOutput(buffer);
+}
+
+/** @param {string} buffer @returns {Node[]} */
+function parseShellOutput(buffer) {
   const lines = buffer.split("\n");
   /** @type {Node[]} */
   const nodes = [];
@@ -331,7 +522,23 @@ export function parse(buffer) {
       let lastCode = -1;
       while (
         j < lines.length &&
-        (isCodeLine(lines[j]) || (codeLines.length > 0 && /^\s+\S/.test(lines[j])))
+        (isCodeLine(lines[j]) ||
+          (codeLines.length > 0 && /^\s+\S/.test(lines[j])) ||
+          // A blank line inside a **diff** does not end it. A diff's context
+          // line for a blank source line is a single space, so a hunk has blank
+          // rows in the middle of it — and without this the hunk header and its
+          // body became two separate fences with the diff's own text stranded as
+          // prose between them.
+          //
+          // Restricted to diffs, and to diff lines on *both* sides, because the
+          // general form of this rule is wrong: `npm --help` opens with a usage
+          // line, a blank line, then `Usage:`, and bridging that swallowed a
+          // heading and a list into one code block. The self-check caught it,
+          // which is the entire reason that case is in there.
+          (codeLines.length > 0 &&
+            lines[j].trim() === "" &&
+            DIFF_LINE.test(codeLines[codeLines.length - 1]) &&
+            DIFF_LINE.test(lines[j + 1] ?? "")))
       ) {
         if (isCodeLine(lines[j])) lastCode = codeLines.length;
         codeLines.push(lines[j++]);
@@ -370,16 +577,31 @@ export function parse(buffer) {
     // colon, and treating it as a label split one continuous run into two
     // nodes — which renders as a paragraph break that the output never had, and
     // exports as a blank line the source never had.
-    const label = plain.length === 0 ? /^\s*([^\n:]+:\s+\S.*)$/.exec(line) : null;
+    const label = plain.length === 0 ? LABEL_LINE.exec(line) : null;
     if (label) {
       flush();
       // The label runs to the end of its paragraph, not the end of its
       // physical line — PowerShell hard-wraps a single error record across
       // several lines, and only bolding the first one splits it visually. A
       // blank line or a code-shaped line ends it.
+      //
+      // So does another label. A continuation line is the *tail* of a sentence
+      // and does not start one, so a line with a label's own shape is a new
+      // label rather than more of this one. Without that test, `git`'s twelve
+      // `warning: …` lines became a single twelve-row level-3 heading: one
+      // node, one tone, one label reveal sweeping a box twelve rows tall, which
+      // is why it read as having no animation at all. Twelve warnings are
+      // twelve things, and the renderer can only stagger what the parser
+      // separates.
       const rest = [];
       let k = i + 1;
-      while (k < lines.length && lines[k].trim() !== "" && !isCodeLine(lines[k])) rest.push(lines[k++]);
+      while (
+        k < lines.length &&
+        lines[k].trim() !== "" &&
+        !isCodeLine(lines[k]) &&
+        !LABEL_LINE.test(lines[k])
+      )
+        rest.push(lines[k++]);
       i = k - 1;
       const text = [label[1], ...rest].join("\n").trim();
       const t = tone(text);
@@ -411,11 +633,16 @@ export function parse(buffer) {
     flush();
     const headingText = line.trim().replace(/:$/, "");
     nodes.push({ kind: "heading", level: 2, text: headingText, tone: tone(headingText) });
-    if (body.length > 1) {
-      nodes.push({ kind: "list", items: body.map((l) => l.trim()) });
-    } else {
-      nodes.push({ kind: "text", parts: inlineParts(body[0]) });
-    }
+    // A body is a list at any length, including one.
+    //
+    // It used to be prose until it had two lines, and that was a rule about how
+    // a finished body looks, applied to a body that is still arriving. `ping`
+    // prints a heading and then one reply per second: the first reply rendered
+    // as prose, the second turned the pair into a list, and the prose node was
+    // destroyed to build it — an entry appearing and vanishing on screen every
+    // time the section grew. A rule whose answer depends on how much has
+    // arrived so far cannot be used on live output.
+    nodes.push({ kind: "list", items: body.map((l) => l.trim()) });
     i = j - 1;
   }
 
@@ -443,4 +670,39 @@ export function toMarkdown(nodes) {
       return n.bold ? `**${text}**` : text;
     })
     .join("\n\n");
+}
+
+/**
+ * What to tell the reader about the command that is still running, shown where
+ * the result line goes once it finishes.
+ *
+ * **Read off the output, not off the command.** A hint keyed on the command
+ * name would be a second curated list, and it would be wrong in both
+ * directions: `git diff` pages only when its output does not fit, and anything
+ * at all can be piped into a pager. The program's own prompt is the evidence,
+ * and it is unambiguous — `less` parks on `:` or `(END)`, `more` on `--More--`.
+ * A pager that is waiting has drawn the thing it is waiting with.
+ *
+ * The fallback is the one thing that is true of every running command.
+ *
+ * @param {string} buffer The block's raw text so far.
+ * @returns {string}
+ */
+export function runHint(buffer) {
+  const lines = buffer.split("\n");
+  let tail = "";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() !== "") {
+      tail = lines[i].trim();
+      break;
+    }
+  }
+  // `:` on its own is `less` waiting, and `:` followed by nothing but the
+  // cursor is the same row mid-keystroke. `(END)` is `less` at the bottom of
+  // the file, which is where a reader is most likely to be looking for the way
+  // out — it is the state that produces "how do I get my prompt back".
+  if (tail === ":" || /^\(END\)$/i.test(tail) || /^--More--/.test(tail)) {
+    return "q quits · space pages · / searches";
+  }
+  return "running · ctrl+c stops";
 }

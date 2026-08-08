@@ -9,9 +9,11 @@ Planning and progress tracking. Read the relevant phase doc **before** starting 
 | [architecture.md](architecture.md) | Stack, the dual-renderer design, the render decision, how the pieces fit |
 | [decisions.md](decisions.md) | Settled decisions and why — check before re-litigating anything |
 | [tasks.md](tasks.md) | Live backlog: bugs, current issues, future feature ideas |
+| [tests.md](tests.md) | What still has to be checked on screen — a queue, marked off by the user |
 | [shells.md](shells.md) | Which shells are supported, tiered by OSC 133 marker fidelity |
 | [docs/ANIMATION.md](docs/ANIMATION.md) | **Binding** animation ruleset |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | **Binding** latency, memory, and throughput budgets |
+| [docs/QUIRKS.md](docs/QUIRKS.md) | Bugs whose *cause* generalises — read when a symptom is confusing |
 
 ### Foundation — a terminal that works
 

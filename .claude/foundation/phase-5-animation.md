@@ -1,6 +1,8 @@
 # Phase 5 — GSAP Animation Layer
 
-**Status: the foundational pass is complete and unverified on screen.** Attention tiers, the handoff, the two bounces, the typewriter reveal, both portfolio ports (hover ring and glitch), the result pulse, the divider draw, the mode crossfade, and the exit animations are all implemented. Nothing here has been run against a real window yet — the numbers are the ones the rules specify, not ones anybody has watched. See *Verify* at the bottom; that list is now the whole remaining work of this phase.
+**Status: complete, and confirmed working on screen (2026-08-07).** The user ran it and reported the layer reading correctly in normal use. That covers the everyday path — entrance, handoff, reveal, hover, the toggles — and it is the confirmation this phase had been missing. It is *not* the same as the *Verify* list below, which is the adversarial half: 500+ lines, a flood, reduced motion, a fast typist. Those remain unrun, and the numbers they would tune (the `6dvw` retract, the `0.6` scale floor, `LABEL_STEP`) are still the specified guesses rather than watched ones.
+
+Original status, for the record: the foundational pass was complete and unverified on screen. Attention tiers, the handoff, the two bounces, the typewriter reveal, both portfolio ports (hover ring and glitch), the result pulse, the divider draw, the mode crossfade, and the exit animations are all implemented. Nothing here has been run against a real window yet — the numbers are the ones the rules specify, not ones anybody has watched. See *Verify* at the bottom; that list is now the whole remaining work of this phase.
 
 > **The binding rules live in [`../docs/ANIMATION.md`](../docs/ANIMATION.md).** Read that file before writing any animation code. This doc tracks *progress*; that file defines *constraints*. If the two disagree, `ANIMATION.md` wins.
 
@@ -64,6 +66,8 @@ Settled after discussion, full detail in `ANIMATION.md`:
 
 ### Status / Learned — the reveal
 
+> **Historical.** Everything in this section describes the typewriter, which was deleted the same day it was first watched against real streaming output — see *the typewriter, and why it is gone* below. It is kept because the `SplitText` reasoning in it is still binding on the reveal that replaced it, and because the row-geometry findings are what a future embed (Phase 9) would hit again.
+
 **The mechanism changed, and `ANIMATION.md` changed with it.** `SplitText` is out. It replaces an element's `innerHTML` with one wrapper per row and restores a saved HTML *string* on `revert()`; both detach the text nodes Svelte holds references to. Output elements re-render from the parser on every PTY chunk, so the first reveal of a still-streaming element would have been the last update that element ever received — the block freezing at whatever text it held while the shell went on producing output nobody could see. That is not a tuning problem and no amount of `autoSplit` fixes it. It would also only have shown up on long-running commands, i.e. after shipping.
 
 What replaced it is a `clip-path` staircase written on the element itself: rows above the cursor visible, the cursor's row wiped to a character boundary, rows below clipped. One tween per element instead of one per row, no DOM touched, nothing to revert. The two functions that can be silently wrong — the polygon and the backlog-scaled cadence — live in [`../../src/lib/reveal.js`](../../src/lib/reveal.js) with a browserless self-check: `node src/lib/reveal.check.mjs`. It asserts the properties that matter, chief among them that a finished reveal clips *nothing* (a staircase that ends one character-cell short is a missing character) and that the visible area never shrinks as the cursor advances.
@@ -76,6 +80,21 @@ What replaced it is a `clip-path` staircase written on the element itself: rows 
 - **The clip is permanent, and clearing it between chunks was the first version's bug.** Output appeared at full strength, vanished, and then typed itself in — because Svelte writes the new text and the reveal pass does not run until the next frame. The element now stays clipped at its last revealed row for as long as it can still grow, so the next chunk's rows are hidden the frame they land, and the first hide happens in the action (which runs during Svelte's mount flush, ahead of the first paint) rather than in the pass.
 - **The reveal never targets an element carrying chrome.** A code block's box, background and border are already there and stay there; only the text inside types. The fenced block and the pinned command line therefore have an inner text element (`.code-text`, `.head-text`) that the reveal owns, and the chrome stays out of it.
 - **The row band is the element's real height divided by its row count, not its `line-height`.** They agree for uniform text. Where they do not, dividing the real height is the only thing that guarantees the last row's bottom edge lands on the element's bottom edge — and since the resting clip sits exactly there, a band a pixel short would hide the final row for good.
+
+### Status / Learned — the typewriter, and why it is gone
+
+The split reveal — type what is live, sweep what is final — was settled before it had been watched against real streaming output. Watching it is what undid it, in two steps on the same evening.
+
+First, coloured tokens were given their bars under the typewriter too, fired as the cursor reached them rather than on a tier stagger. That fixed the visible symptom (the same `app_config_dir()` was a label in one block and undifferentiated typed text in the next) and left the cause: **which animation a piece of output got was decided by where a PTY chunk boundary happened to fall.** A chunk boundary is an artefact of the pipe. The reader was being shown a distinction with nothing behind it, and no amount of tuning either reveal was going to put something behind it.
+
+So the typewriter was deleted rather than retuned. There is one reveal now — bars in tier order, wave underneath — played as content lands, so the timeline is still the shell's. Deleted with it: `revealElement`, the clip staircase, the output caret, `metricsOf`/`rest`/`visibleRows`, the `TYPE_*` constants, and `src/lib/reveal.js` with its self-check. `REVEAL_MODES` is `reveal` / `instant`; the old `typewriter` key falls back to the default on load, which is what `pick()` is for.
+
+Three things that came out of it and are worth keeping in mind:
+
+- **Live output is not character-split, and that was arrived at the hard way.** The first attempt held the *growing edge* — the last tracked element of an open block — on the theory that it was the only one that could still change. Watching a pager killed it inside a minute: `less` repaints the whole screen on every keypress, so every element in that block is rewritten each time. A single-element block showed **nothing at all**, and the elements that did reveal were split while still changing, which tore them mid-animation. Now nothing is held: elements in an open block reveal on the same beat as everything else, with the bars over their tokens and the prose rising as one piece instead of waving. The bars are safe on changing content because they are overlay divs; the wave is not because it rewrites the element's children.
+- **Flood control changed shape.** The 40-pending-rows queue cap counted rows because the typewriter walked rows; the unit is the element now, and `inView` is the whole test. What is not yet solved is that nothing staggers *between* elements — a burst mounting thirty on-screen elements reveals thirty at once. Arrival order used to supply that spacing. Unwatched; if it flashes, the fix is a small per-element offset in the pass.
+
+Unwatched on screen overall: whether the coarser rise on live prose is noticeable next to the wave on finished prose, and whether a burst that mounts many on-screen elements at once reads as a reveal or as a flash.
 
 ### Status / Learned — the ports and the rest
 

@@ -8,8 +8,10 @@ Cross-platform terminal (Windows + Arch) that renders command output as structur
 
 - [.claude/tasks.md](.claude/tasks.md) — bugs, blockers, open questions, future ideas. Check before starting anything.
 - [.claude/decisions.md](.claude/decisions.md) — settled calls and why. Check before re-litigating.
+- [.claude/tests.md](.claude/tests.md) — what still has to be checked **on screen**. Any turn that changes behaviour appends a dated section: one unchecked box per check, each naming the command to run and what should happen. Cover only what that turn changed. The user marks them `[x]` or `[!]`; a section is deleted once it is all `[x]`. A Stop hook enforces this — a turn that touches `src/` or `src-tauri/` without updating this file is blocked from ending. Anything still unchecked is unverified, and calling it done is a lie.
+- [.claude/docs/QUIRKS.md](.claude/docs/QUIRKS.md) — bugs whose cause generalises, each with the rule that came out of it. **Check it when a symptom is confusing** — output in the wrong place, an animation misfiring, something slow for no visible reason. Most of these came back wearing a different hat at least once.
 
-**Before writing or changing any animation code, read [.claude/docs/ANIMATION.md](.claude/docs/ANIMATION.md).** It is binding, not advisory — it covers the typewriter reveal, stagger timing, flood control, and cleanup requirements.
+**Before writing or changing any animation code, read [.claude/docs/ANIMATION.md](.claude/docs/ANIMATION.md).** It is binding, not advisory — it covers the reveal (label bars and the character wave), stagger timing, what live output may not do, flood control, and cleanup requirements.
 
 **Before touching the output path (PTY read → IPC → parse → DOM), read [.claude/docs/PERFORMANCE.md](.claude/docs/PERFORMANCE.md).** Also binding — latency/memory/throughput budgets, IPC coalescing, scrollback virtualization, and the measurement protocol. The bar: never noticeably heavier than a standard terminal.
 
@@ -27,15 +29,20 @@ The plugins installed for this repo are not optional decoration. Use them by def
 
 [CHANGELOG.md](CHANGELOG.md) is one line per change — what changed, plus the cause or constraint if it is not obvious. No rationale essays, no feature tours, no selling the change back to the reader. The reasoning belongs in the phase docs and `decisions.md`.
 
+**Only changes someone using the terminal would notice go in it.** A file moved, a component extracted, a type made reactive, a doc corrected — none of those are changes to the product, and a changelog they are in stops being readable as one. Refactors are in the git log already. Released sections are history and are not rewritten.
+
 ## Layout
 
 - `src-tauri/src/pty.rs` — PTY session, streams raw bytes to the frontend over a Tauri channel.
+- `src-tauri/src/config.rs` — `config.toml`: load, save, `~` expansion, and the directory watcher that pushes external edits to the frontend.
 - `src-tauri/src/screenshot.rs` — F2 debug capture. Writes `demo/` and rewrites the README gallery. Dev-only: the path comes from `CARGO_MANIFEST_DIR`.
 - `src/lib/parse.js` — output → AST. Self-check: `node src/lib/parse.check.mjs`.
-- `src/lib/reveal.js` — typewriter clip geometry. Self-check: `node src/lib/reveal.check.mjs`.
+- `src/lib/settings.ts` — every setting as data: the keys `config.toml` stores, the labels the panel renders, what each mode resolves to. Data only — applying a setting is DOM and stays in the page.
+- `src/lib/anim.ts` — the animation values more than one surface uses. A shared value is a statement that two surfaces are the same gesture; anything used once stays where it is used.
+- `src/lib/components/Settings.svelte` — the Esc overlay. Owns its markup, its CSS and both halves of its animation; the page owns the values and does the applying.
 - `src/lib/reveal-plan.js` — which reveal a run of parsed text gets, and in what order. Self-check: `node src/lib/reveal-plan.check.mjs`.
-- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
-- `src-tauri/src/dir.rs` — directory listing for the Tab suggestions. Dumb like `pty.rs`: names and is-it-a-directory, nothing more.
+- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), the ghost completion's sources, shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
+- `src-tauri/src/dir.rs` — directory listing for the Tab suggestions, and `open <path>`. Dumb like `pty.rs`: names and is-it-a-directory, nothing more.
 - `src/routes/+page.svelte` — terminal view.
 
 ## Architecture
@@ -46,6 +53,10 @@ Two renderers over one PTY stream:
 - **xterm.js** (fallback) — mounted only on alt-screen enter (`\x1b[?1049h`) for `vim`, `htop`, `claude`. Raw passthrough, never intercepted, never animated.
 
 Command boundaries come from OSC 133 shell integration, parsed by xterm's own OSC handlers in the frontend — never in Rust. A marker delivered out-of-band from the bytes around it arrives out of order, and the output gets filed under the wrong command. Rust is a dumb pipe.
+
+## `/help` is part of the feature, not documentation of it
+
+Every command VAD/OS answers itself and every key it takes from the shell goes into `HELP_NODES` in `src/routes/+page.svelte`, **in the same turn that adds it**. There is no other place a user can find out what this terminal does — no man page, no menu bar, no docs site — so a key that is not in `/help` does not exist as far as anyone but the author is concerned. Adding the binding and adding the line are one task; a change that ships without the line is unfinished, the same way a behaviour change without a `tests.md` entry is.
 
 ## Rules that outlive any phase
 

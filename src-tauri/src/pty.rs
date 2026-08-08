@@ -84,7 +84,10 @@ fn write_temp(name: &str, contents: &str) -> Result<std::path::PathBuf, String> 
 }
 
 #[cfg(windows)]
-fn build_shell_command() -> Result<CommandBuilder, String> {
+fn build_shell_command(_elevate: bool) -> Result<CommandBuilder, String> {
+    // `elevate` is unused here by design: Windows elevation happens by
+    // relaunching the whole app through UAC before this runs (see `config.rs`),
+    // because a process cannot raise its own token and a PTY child inherits it.
     let mut cmd = CommandBuilder::new("powershell.exe");
     cmd.arg("-NoLogo");
     cmd.arg("-NoExit");
@@ -94,11 +97,23 @@ fn build_shell_command() -> Result<CommandBuilder, String> {
 }
 
 #[cfg(not(windows))]
-fn build_shell_command() -> Result<CommandBuilder, String> {
+fn build_shell_command(elevate: bool) -> Result<CommandBuilder, String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let shell_name = shell.rsplit('/').next().unwrap_or("bash");
 
-    let mut cmd = CommandBuilder::new(&shell);
+    // Root is the *shell's*, not the app's. `-E` keeps the environment, which
+    // is what carries ZDOTDIR and therefore the integration snippet — without
+    // it the elevated session silently loses its OSC 133 markers.
+    // ponytail: sudo asks on the PTY, which is the one place the user can
+    // answer it. pkexec would need a polkit agent and gives no better result.
+    let mut cmd = if elevate {
+        let mut cmd = CommandBuilder::new("sudo");
+        cmd.arg("-E");
+        cmd.arg(&shell);
+        cmd
+    } else {
+        CommandBuilder::new(&shell)
+    };
     if shell_name == "zsh" {
         // ZDOTDIR override makes zsh read <dir>/.zshrc instead of ~/.zshrc; our
         // snippet sources the real one first.
@@ -126,7 +141,13 @@ fn build_shell_command() -> Result<CommandBuilder, String> {
 /// Called twice by design: once from `setup`, so the shell boots alongside the
 /// webview, and once from `pty_attach` as the fallback for the case where the
 /// early start failed. The second call is a no-op whenever the first worked.
-pub fn start(state: &PtyState, cols: u16, rows: u16, cwd: Option<String>) -> Result<(), String> {
+pub fn start(
+    state: &PtyState,
+    cols: u16,
+    rows: u16,
+    cwd: Option<String>,
+    elevate: bool,
+) -> Result<(), String> {
     let mut session = state.session.lock().unwrap();
     if session.is_some() {
         return Ok(());
@@ -136,7 +157,7 @@ pub fn start(state: &PtyState, cols: u16, rows: u16, cwd: Option<String>) -> Res
         .openpty(size(cols, rows))
         .map_err(|e| e.to_string())?;
 
-    let mut cmd = build_shell_command()?;
+    let mut cmd = build_shell_command(elevate)?;
     if let Some(dir) = cwd.filter(|d| !d.is_empty()) {
         cmd.cwd(dir);
     }
@@ -189,13 +210,24 @@ pub fn start(state: &PtyState, cols: u16, rows: u16, cwd: Option<String>) -> Res
 /// markers land the same way every later one does.
 #[tauri::command]
 pub fn pty_attach(
+    app: tauri::AppHandle,
     state: State<PtyState>,
     cols: u16,
     rows: u16,
-    cwd: Option<String>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<(), String> {
-    start(&state, cols, rows, cwd)?;
+    // Normally a no-op — the shell was started in `setup`. The config is read
+    // again rather than passed in because this only runs when that start
+    // failed, and a stale copy of the settings is the wrong thing to fall back
+    // to on the one path that exists to recover.
+    let settings = crate::config::load(&app);
+    start(
+        &state,
+        cols,
+        rows,
+        crate::config::expand(&settings.shell.cwd),
+        settings.system.start_as_admin,
+    )?;
 
     let mut sink = state.sink.lock().unwrap();
     if let Sink::Buffer(backlog) = &mut *sink {

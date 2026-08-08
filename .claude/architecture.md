@@ -157,10 +157,18 @@ ConPTY is the one that leaks. It rewrites parts of the sequence stream on its wa
 src-tauri/src/
   lib.rs          Tauri builder, command registration
   pty.rs          PTY session: spawn / write / resize
+  config.rs       config.toml: load, save, ~ expansion, external-edit watcher
+  dir.rs          directory listing for Tab suggestions, and `open <path>`
   screenshot.rs   F2 debug capture → demo/, rewrites the README gallery
 src/lib/
   parse.js        output → AST (headings, lists, code, inline code, tone)
-  parse.check.mjs assert-based self-check: node src/lib/parse.check.mjs
+  input.js        the input bar's non-DOM half: suggestions, quoting, segments
+  reveal-plan.js  which reveal a run of parsed text gets, and in what order
+  settings.ts     every setting as data — the keys config.toml stores
+  anim.ts         the animation values more than one surface shares
+  *.check.mjs     assert-based self-checks: node src/lib/<name>.check.mjs
+src/lib/components/
+  Settings.svelte the Esc overlay: its markup, its CSS, its entrance and exit
 src/routes/
   +layout.ts      ssr = false (SPA mode)
   +page.svelte    terminal view
