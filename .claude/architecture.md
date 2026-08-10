@@ -28,10 +28,13 @@ Warp, Ghostty, and WezTerm are all polished. Polish is not the moat. The thing n
 The constraint that comes with it: **compatibility first, beauty second.** Most command output is plain text or ANSI, and rendering it as markdown would be wrong more often than right. A terminal that mangles `ls` output to look pretty is a terminal people uninstall on day one. So:
 
 1. Plain and ANSI output renders **exactly as it is**. This is the default path and it is never a downgrade.
-2. Markdown rendering is entered on **evidence** — an explicit declaration from the program, or a detector confident enough to be right nearly every time. See [foundation/phase-8-markdown-engine.md](foundation/phase-8-markdown-engine.md).
+2. Structured rendering is entered on **evidence** — an explicit declaration from the program, an adapter that knows the command, or a detector confident enough to be right nearly every time. See [foundation/phase-8-document-engine.md](foundation/phase-8-document-engine.md).
 3. Every block keeps its raw bytes and can be **toggled back** to them. If the renderer gets it wrong, one keystroke undoes it.
+4. **If VAD/OS does not understand something, it behaves like a conventional terminal** rather than trying to interpret it. The fallback direction is fixed, so a new heuristic has to argue against it instead of only being measured on how often it is right.
 
-Rule 3 is what makes rules 1 and 2 safe to be wrong about.
+Rule 3 is what makes rules 1 and 2 safe to be wrong about. Rule 4 is what they mean when neither fires.
+
+Rules 1 and 3 are currently **aspirational rather than implemented**: a block keeps decoded text with no bytes and no colour, so ANSI is not rendered as it is and there is nothing to toggle back to. [foundation/phase-h1-raw-fidelity.md](foundation/phase-h1-raw-fidelity.md).
 
 ## Stack
 
@@ -74,6 +77,23 @@ xterm.js is **not** the primary view. Since ~95% of output is markdown blocks wi
 
 **Block text is read back out of xterm's screen buffer**, not accumulated from the raw stream. xterm has already applied every escape sequence — cursor moves, erase-line, PSReadLine's full-line redraw on each keystroke, reflow on resize. Each block holds an `IMarker` on its first row and re-reads to the cursor with `translateToString()`.
 
+### What a block holds
+
+Four things, and the order is the direction of derivation. Anything that has to be right reads toward the bottom of this list, not up it.
+
+| | | |
+|---|---|---|
+| **metadata** | `id`, `cwd`, `command`, `exitCode`, and later `startedAt` / `endedAt` | [foundation/phase-13-command-as-event.md](foundation/phase-13-command-as-event.md) adds the timing |
+| **raw** | the byte log — what the program actually emitted | **authoritative**, evicted oldest-first under memory pressure |
+| **buffer** | decoded text plus attribute runs, read back from the screen | the render source |
+| **nodes** | the AST | derived, cheap to drop, re-derived on demand |
+
+The distinction that is easy to lose: **the screen is the render source and the bytes are the record.** Replaying the byte log as text reproduces every cursor move and redraw as literal garbage, which is the reason the block reads from xterm in the first place. The log exists so a block can be *shown* as itself, copied and exported — not so it can be re-rendered.
+
+Under the memory budget in [docs/PERFORMANCE.md](docs/PERFORMANCE.md), the AST is what gets dropped first and the bytes are what get kept.
+
+**The raw and attribute halves of this do not exist yet** — today a block keeps the decoded string and nothing else. [foundation/phase-h1-raw-fidelity.md](foundation/phase-h1-raw-fidelity.md) is that work, and it is why nothing in the Expansion group starts before it.
+
 **Block renderer** — plain DOM. One `<section>` per command: divider, `#` command heading, output body, `##` result heading tinted by exit code. This is what gets styled and animated.
 
 **xterm.js** — mounted only when the PTY emits alt-screen enter (`\x1b[?1049h`), torn down on exit (`\x1b[?1049l`). This is the `vim` / `htop` / `claude` CLI path. Raw bytes, no interception, **no animation** except the crossfade in and out.
@@ -107,7 +127,7 @@ block snapshot (text read back from xterm's buffer)
   └─────────────┘             └──────────────────────┘
 ```
 
-**Declared** beats **detected** beats **raw**, and raw is the default when neither fires. A program that wants markdown says so; everything else has to earn it.
+**Declared** beats **a known command adapter** beats **detected** beats **plain**, and plain is the default when none of them fire. A program that wants a document says so; everything else has to earn it. The full ordering is in [foundation/phase-8-document-engine.md](foundation/phase-8-document-engine.md), along with the asymmetry that governs it: a missed structure shows plain text, a false positive changes what the program printed, and only the second is a bug.
 
 Three properties this has to keep:
 
@@ -172,7 +192,10 @@ src/lib/components/
 src/routes/
   +layout.ts      ssr = false (SPA mode)
   +page.svelte    terminal view
-.claude/docs/ANIMATION.md    binding animation ruleset
-.claude/docs/PERFORMANCE.md  binding performance budgets
+.claude/docs/ANIMATION.md     binding animation ruleset
+.claude/docs/PERFORMANCE.md   binding performance budgets
+.claude/docs/ACCESSIBILITY.md binding — never colour alone, and what else a semantic layer owes
+compat/           fixtures and the checklist a person runs — phase H2
+BENCHMARKS.md     measured numbers, as opposed to PERFORMANCE.md's budgets — phase H3
 CLAUDE.md         project entry point for agents
 ```

@@ -36,7 +36,7 @@
  * @typedef {"warn" | "ok" | null} Tone
  * @typedef {"link" | "path" | "time" | null} InlineKind
  * @typedef {{ code: boolean, text: string, kind?: InlineKind }} TextPart
- * @typedef {"flag" | "var" | "str" | null} CodeToken
+ * @typedef {"flag" | "var" | "str" | "link" | "time" | "path" | null} CodeToken
  * @typedef {{ token: CodeToken, text: string }} CodeSpan
  * @typedef {{ kind: "heading", level: 2 | 3, text: string, tone: Tone }
  *          | { kind: "list", items: string[] }
@@ -70,6 +70,12 @@ const LABEL_LINE = /^\s*([^\n:]+:\s+\S.*)$/;
 // to trip the density check below on their own.
 const DIFF_LINE = /^(diff --git |--- |\+\+\+ |@@ |[+-](?!\+|-))/;
 const SYMBOLS = /[{}()[\];:,"=<>|&$`]/g;
+/**
+ * The rule line under a table's header — `----   -------------   ------ ----`.
+ * Two or more dash runs and nothing else, so a single `-----` used as a divider
+ * stays a divider and a diff's `--- a/file` stays a diff.
+ */
+const TABLE_RULE = /^\s*-{2,}(?: +-{2,})+\s*$/;
 
 /** @param {string} line */
 function isCodeLine(line) {
@@ -197,6 +203,19 @@ const COMMAND_RUN = new RegExp(
     String.raw`(?:[ \t]+(?:${COMMAND_ARG}))*`,
 );
 
+// The three shapes that mean the same thing wherever they appear — in a
+// sentence, in a fenced block, in a diff. Written once and spent by both
+// `CODE_TOKEN` (prose) and `CODE_SPAN` (inside a block), because a path that
+// reads as a path in one and as nothing in the other is the parser
+// contradicting itself.
+const LINK = /https?:\/\/\S*[\w/#=&-]/.source;
+const TIME = /\b\d{1,2}:\d{2}(?::\d{2})?\b/.source;
+// `+` is in the class because SvelteKit's route files are named `+page`,
+// `+layout` — without it a path stopped one character short of the filename it
+// was pointing at. The Windows arm is second so a drive letter is not read as
+// the tail of something else.
+const PATH = /(?<!\w)(?:~|\.{1,2})?\/[\w./+-]+|[A-Za-z]:\\[\w\\.-]+/.source;
+
 const CODE_TOKEN = new RegExp(
   [
     // Text that already marks itself as code. A pair of backticks is the one
@@ -208,27 +227,21 @@ const CODE_TOKEN = new RegExp(
     // stray backtick in output cannot swallow the rest of a paragraph.
     // The backticks are consumed with the match; `inlineParts` hands back only
     // what was between them.
-    /`[^`\n]+`/,
+    /`[^`\n]+`/.source,
     // Then: a command run absorbs its own flags and paths, so they are never
     // matched out from under it by the per-token rules below.
-    COMMAND_RUN,
-    /https?:\/\/\S*[\w/#=&-]/,
+    COMMAND_RUN.source,
+    LINK,
     // Clock time, the shape every dev server and logger stamps its lines with.
     // Ahead of the path rule so `12:30` never reads as anything else, and after
     // the URL rule so a port number stays part of its URL.
-    /\b\d{1,2}:\d{2}(?::\d{2})?\b/,
-    /(?<![\w-])--(?![\w-])/,
-    /(?<![\w-])--?[A-Za-z][\w-]*/,
-    // `+` is in the class because SvelteKit's route files are named `+page`,
-    // `+layout` — without it a path stopped one character short of the filename
-    // it was pointing at.
-    /(?<!\w)(?:~|\.{1,2})?\/[\w./+-]+/,
-    /[A-Za-z]:\\[\w\\.-]+/,
-    /\b[A-Za-z_]\w*\(\)/,
-    /\b\w+=[\w./-]+\b/,
-  ]
-    .map((r) => r.source)
-    .join("|"),
+    TIME,
+    /(?<![\w-])--(?![\w-])/.source,
+    /(?<![\w-])--?[A-Za-z][\w-]*/.source,
+    PATH,
+    /\b[A-Za-z_]\w*\(\)/.source,
+    /\b\w+=[\w./-]+\b/.source,
+  ].join("|"),
   "g",
 );
 
@@ -291,11 +304,21 @@ function inlineParts(text, re = CODE_TOKEN) {
 //  - var: `<n>`, `<path>`, `<param1>`. No whitespace inside, so a stray `<`
 //    in prose cannot swallow the rest of a line.
 //  - str: single or double quoted, non-greedy, never crossing a line break.
+//  - link, time, path: the same three shapes prose gets, from the same sources.
+//    A block is where most of them actually occur — a stack trace is paths, a
+//    log is timestamps — and leaving them flat there meant the one place the
+//    reader is scanning for a filename was the one place it was not marked.
+//
+// Order is precedence: a URL absorbs the `//` and the colon that the path and
+// time rules would otherwise cut it apart at, so it goes first.
 const CODE_SPAN = new RegExp(
   [
+    `(?<link>${LINK})`,
+    `(?<time>${TIME})`,
     /(?<flag>(?<![\w-])(?:--(?:\[[\w-]+\])?[A-Za-z][\w-]*(?:\[[\w-]+\][\w-]*)*|-[A-Za-z](?![\w-])))/.source,
     /(?<var><[^<>\s]+>)/.source,
     /(?<str>'[^'\n]*'|"[^"\n]*")/.source,
+    `(?<path>${PATH})`,
   ].join("|"),
   "g",
 );
@@ -329,9 +352,12 @@ export function codeSpans(text) {
   let last = 0;
   for (const m of text.matchAll(CODE_SPAN)) {
     if (m.index > last) spans.push({ token: null, text: text.slice(last, m.index) });
+    // Exactly one alternative can have matched, so the group that is defined is
+    // the kind. Read by name rather than by a chain of ternaries so adding a
+    // shape to `CODE_SPAN` is one line there and none here.
     const groups = /** @type {Record<string, string | undefined>} */ (m.groups ?? {});
     const token = /** @type {CodeToken} */ (
-      groups.flag ? "flag" : groups.var ? "var" : groups.str ? "str" : null
+      Object.keys(groups).find((name) => groups[name] !== undefined) ?? null
     );
     spans.push({ token, text: m[0] });
     last = m.index + m[0].length;
@@ -511,6 +537,33 @@ function parseShellOutput(buffer) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
+    // A column table is one thing, and every rule below it would have taken it
+    // for several. `Get-ChildItem` is the case that showed it: a mode string
+    // like `-a----` is a `-` followed by a letter, which is exactly a diff's
+    // deleted line, so the file rows became a fenced diff while the directory
+    // rows above them — `d-----`, not diff-shaped — stayed prose with their
+    // timestamps tinted. One listing, rendered two ways, in the command people
+    // run most.
+    //
+    // The rule line is the evidence and it is hard to trip by accident: two or
+    // more runs of dashes with nothing else on the line. Everything under it up
+    // to a blank line is the table, and the header directly above it comes back
+    // out of the paragraph it had already been added to.
+    if (TABLE_RULE.test(line)) {
+      /** @type {string[]} */
+      const rows = [];
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() !== "") rows.push(lines[j++]);
+      if (rows.length) {
+        const header = plain.length && plain[plain.length - 1].trim() ? plain.pop() : null;
+        flush();
+        const text = [...(header === null ? [] : [header]), line, ...rows].join("\n");
+        nodes.push({ kind: "code", text, spans: codeSpans(text) });
+        i = j - 1;
+        continue;
+      }
+    }
+
     if (isCodeLine(line)) {
       let j = i;
       /** @type {string[]} */
@@ -673,22 +726,90 @@ export function toMarkdown(nodes) {
 }
 
 /**
+ * ponytail: past this many lines a text node is rendered as one element again.
+ * A line is a DOM element and an entry in the reveal's registry, and a `cat` of
+ * a long file is one text node — the cap keeps that from becoming ten thousand
+ * of each for an animation nobody is watching at that length.
+ */
+const LINE_MAX = 400;
+
+/**
+ * A text node's parts, regrouped one array per line.
+ *
+ * **The line is what arrives, so the line has to be what animates.** An element
+ * animates once, on the chunk it mounted in; a whole paragraph rendered as one
+ * element therefore animates when its *first* line lands and every line after
+ * that appears with nothing. That is the same fault the reveal had on `<ul>`
+ * (QUIRKS.md §20) in its other form: streaming plain output — a loop printing a
+ * number a second — grows one element instead of adding new ones.
+ *
+ * Newlines are dropped from the parts and belong to the caller, which puts them
+ * back between the groups: the text is inside a `<pre>`, so the break has to be
+ * a real character and not a margin.
+ *
+ * Past `max` lines the whole node comes back as a single group, which is the
+ * one-element rendering this replaced — see `LINE_MAX`.
+ *
+ * @param {TextPart[]} parts
+ * @param {number} [max]
+ * @returns {TextPart[][]}
+ */
+export function lineParts(parts, max = LINE_MAX) {
+  /** @type {TextPart[][]} */
+  const lines = [[]];
+  for (const part of parts) {
+    const pieces = part.text.split("\n");
+    for (let i = 0; i < pieces.length; i++) {
+      if (i) lines.push([]);
+      // An empty piece is the line break itself — the break is carried by the
+      // new group, so there is nothing to add to it.
+      if (pieces[i]) lines[lines.length - 1].push({ ...part, text: pieces[i] });
+    }
+  }
+  return lines.length > max ? [parts] : lines;
+}
+
+/**
+ * A pager invoked by name, at the start of the line or after a pipe. `man` and
+ * `bat` are here because they *are* a pager as far as the keyboard is
+ * concerned, whatever they run underneath.
+ */
+const PAGER_CMD = /(?:^|[|;&]\s*)\s*(?:less|more|most|man|bat)\b/i;
+/**
+ * `git` subcommands that page by default. Not exhaustive and does not need to
+ * be: a missing one falls back to the honest generic hint, and a wrong one is
+ * still true about `ctrl+c`.
+ */
+const GIT_PAGED =
+  /^\s*git\s+(?:-\S+\s+|\S+=\S+\s+)*(?:diff|log|show|blame|reflog|branch|tag|help)\b/i;
+/** The two ways to tell `git` not to page, both of which settle it. */
+const GIT_NO_PAGER = /--no-pager|\s-P(?=\s|$)/;
+
+/**
  * What to tell the reader about the command that is still running, shown where
  * the result line goes once it finishes.
  *
- * **Read off the output, not off the command.** A hint keyed on the command
- * name would be a second curated list, and it would be wrong in both
- * directions: `git diff` pages only when its output does not fit, and anything
- * at all can be piped into a pager. The program's own prompt is the evidence,
- * and it is unambiguous — `less` parks on `:` or `(END)`, `more` on `--More--`.
- * A pager that is waiting has drawn the thing it is waiting with.
+ * **The program's own prompt is the strong evidence and is read first.** `less`
+ * parks on `:` or `(END)`, `more` on `--More--`; a pager that is waiting has
+ * drawn the thing it is waiting with, and that is true however it was invoked —
+ * including piped into from something this could never have a list for.
+ *
+ * **The command line is the weak second signal, and it is here because the
+ * first one missed the commonest case.** `git diff` was reported showing
+ * `ctrl+c stops` while `less` had the keyboard, which is the exact advice that
+ * does not work: `less` ignores an interrupt and only answers `q`. Whatever the
+ * pager drew there, it did not reach this function, so a command that is
+ * *known* to page now says so on its own. Ranked below the prompt because it is
+ * a guess about a program's behaviour rather than a reading of it, and worded
+ * to stay true if the guess is wrong — `ctrl+c` is still named.
  *
  * The fallback is the one thing that is true of every running command.
  *
  * @param {string} buffer The block's raw text so far.
+ * @param {string} [command] The command line that produced it.
  * @returns {string}
  */
-export function runHint(buffer) {
+export function runHint(buffer, command = "") {
   const lines = buffer.split("\n");
   let tail = "";
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -704,5 +825,71 @@ export function runHint(buffer) {
   if (tail === ":" || /^\(END\)$/i.test(tail) || /^--More--/.test(tail)) {
     return "q quits · space pages · / searches";
   }
+  if (PAGER_CMD.test(command) || (GIT_PAGED.test(command) && !GIT_NO_PAGER.test(command))) {
+    return "q quits the pager · ctrl+c stops";
+  }
   return "running · ctrl+c stops";
 }
+
+/**
+ * What a non-zero exit code meant, where anyone knows.
+ *
+ * Two numbering schemes reach this line and neither is readable raw. A shell
+ * reports a killed process as `128 + signal`, and Windows reports a crashed one
+ * as an NTSTATUS — a 32-bit value that arrives through PowerShell as a *signed*
+ * integer, which is where `exit -1978335212` comes from. It is the same number
+ * as `0x8A150014` and only one of those two forms can be looked up or
+ * recognised.
+ *
+ * So: a name when the code is one of the handful that actually recur, hex
+ * whenever the value is not a plain small number, and the raw value always
+ * present in one form or the other. Nothing is invented — an unknown code says
+ * only what it is, because a wrong guess about why a program died is worse than
+ * no guess.
+ *
+ * @param {number} code
+ * @returns {string}
+ */
+export function exitLabel(code) {
+  if (code === 0) return "done";
+  // NTSTATUS and HRESULT values have the high bit set, so they arrive negative.
+  // Read back as unsigned, which is the form they are documented and searched
+  // in.
+  const unsigned = code >>> 0;
+  const known = EXIT_MEANINGS[unsigned];
+  // A plain small number is already the thing a shell script would test against
+  // — `if ($LASTEXITCODE -eq 1)` — so it stays decimal. Anything wider is a
+  // status word and reads as hex or not at all.
+  const shown = code > 0 && code <= 255 ? `${code}` : `0x${unsigned.toString(16)}`;
+  return known ? `exit ${shown} · ${known}` : `exit ${shown}`;
+}
+
+/**
+ * The codes worth naming, keyed unsigned. Curated rather than exhaustive: these
+ * are the ones that come back from ordinary use — a command that was
+ * interrupted, one that crashed, one that was never there.
+ *
+ * `128 + n` is the POSIX convention for "killed by signal n" and PowerShell's
+ * native commands inherit it on Linux; the `0xC…` values are the Windows
+ * equivalents of the same events.
+ */
+const EXIT_MEANINGS = /** @type {Record<number, string>} */ ({
+  1: "failed",
+  126: "not executable",
+  127: "command not found",
+  129: "hung up",
+  130: "stopped (ctrl+c)",
+  131: "quit",
+  137: "killed",
+  139: "crashed (segfault)",
+  143: "terminated",
+  0xc0000005: "crashed (access violation)",
+  0xc000001d: "crashed (illegal instruction)",
+  0xc000008e: "crashed (divide by zero)",
+  0xc0000135: "missing DLL",
+  0xc0000142: "DLL init failed",
+  0xc000013a: "stopped (ctrl+c)",
+  0xc0000374: "crashed (heap corruption)",
+  0xc00000fd: "crashed (stack overflow)",
+  0xc0000409: "crashed (stack buffer overrun)",
+});

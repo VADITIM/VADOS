@@ -300,7 +300,152 @@ export function wordSuggestions(text, col, history, commands, subcommands) {
     seen.add(name);
     words.push({ text: name, hint, start });
   }
-  return [...lines, ...words];
+  // The plain-word route, first word only: a command found by what it does
+  // rather than by how it is spelled. After the name matches, because someone
+  // typing `l` most likely means the name they already know.
+  const byWord = space === -1 ? wordMatches(token, start) : [];
+  const already = new Set(words.map((w) => w.text));
+  return [...lines, ...words, ...byWord.filter((w) => !already.has(w.text))];
+}
+
+/**
+ * A cwd short enough to sit in the input bar, keeping the end that says where
+ * you are.
+ *
+ * The last three segments are the ones that carry the answer — a project, a
+ * folder in it, the folder in that. Everything above them is replaced by one
+ * dot each, so the depth is still on screen even though the names are not:
+ * `C:/Users/vadim/source/VADOS/src/lib` becomes `..../VADOS/src/lib`.
+ *
+ * Only past `max`, and only when there is something to elide. A short path is
+ * shown whole — the point is to stop a deep path pushing the command it is
+ * standing next to off the bar, not to hide paths.
+ *
+ * @param {string} path
+ * @param {number} [max] Length past which shortening applies.
+ * @returns {string}
+ */
+export function shortCwd(path, max = 30) {
+  if (path.length <= max) return path;
+  // Kept, not normalised: the separator the shell reported is the one the user
+  // would type, and rewriting it would make the bar disagree with the line.
+  const sep = path.includes("/") ? "/" : "\\";
+  const parts = path.split(sep);
+  const KEEP = 3;
+  if (parts.length <= KEEP) return path;
+  return ".".repeat(parts.length - KEEP) + sep + parts.slice(-KEEP).join(sep);
+}
+
+/**
+ * The plain word for a command whose name is an abbreviation, so the strip can
+ * be searched with the word and still write the command.
+ *
+ * **Typing the word runs the command**, and that is a deliberate exception to
+ * everything else here: the word is swapped for the command as the line is sent,
+ * so the block records `ls` and the history remembers `ls`. Submitting `list`
+ * and being told there is no such command is what the words exist to prevent,
+ * and a strip nobody Tabbed through is not an answer to it. The swap is a single
+ * word at the head of the line, it is visible in the block the moment it runs,
+ * and `WORD_ONLY` below is where it stops.
+ *
+ * Only names that are genuinely abbreviations are here. `mkdir` and `unzip` say
+ * what they do; a second name for them would be noise in the strip. Nothing
+ * platform-specific either — `sudo` has no meaning on Windows and offering it
+ * there is worse than not knowing the word.
+ *
+ * @type {Record<string, string[]>}
+ */
+export const COMMAND_WORDS = {
+  ls: ["list"],
+  rm: ["remove", "delete"],
+  cp: ["copy"],
+  mv: ["move", "rename"],
+  cd: ["goto"],
+  ps: ["processes"],
+  df: ["disk", "free"],
+  du: ["size"],
+  grep: ["search", "find"],
+  sed: ["replace"],
+  chmod: ["permissions"],
+  chown: ["owner"],
+  tar: ["archive", "extract"],
+  curl: ["download", "request"],
+  cls: ["clear"],
+  taskkill: ["kill"],
+  netstat: ["ports"],
+  tracert: ["trace"],
+  diff: ["compare"],
+};
+
+/**
+ * The word-to-command pairs, flattened once at module load rather than per
+ * keystroke. Order follows the table, so the more literal word of a pair
+ * ("remove" before "delete") is the one a shared prefix finds first.
+ *
+ * @type {{ word: string, command: string }[]}
+ */
+const WORD_PAIRS = Object.entries(COMMAND_WORDS).flatMap(([command, words]) =>
+  words.map((word) => ({ word, command })),
+);
+
+/**
+ * Words that are commands somewhere in their own right, and are therefore never
+ * swapped for anything — the strip may still offer the short name beside them.
+ *
+ * `copy`, `move`, `rename`, `kill` and `clear` are PowerShell aliases and shell
+ * builtins; `find` is a real program on both Windows and Linux, and means
+ * something else on each. Rewriting a word that already runs is the one way this
+ * feature could take a working line away from someone, so the rule is not "is it
+ * likely to exist" but "has it ever been a command" — and when in doubt, a new
+ * word goes in here rather than out of the table.
+ */
+const WORD_ONLY = new Set(["copy", "move", "rename", "kill", "clear", "find"]);
+
+/**
+ * The line as it will actually be sent, when its first word is a plain word for
+ * a command. Empty when there is nothing to swap, which is the common case.
+ *
+ * Exact match only: `remove` is the word, `remo` is half of one and belongs to
+ * the strip. Everything after the first word is carried through untouched — the
+ * arguments are the user's and are not ours to read.
+ *
+ * @param {string} line The line as mirrored from the shell.
+ * @returns {string}
+ */
+export function wordCommand(line) {
+  const match = /^(\s*)(\S+)/.exec(line);
+  if (!match) return "";
+  const word = match[2].toLowerCase();
+  if (WORD_ONLY.has(word)) return "";
+  const pair = WORD_PAIRS.find((p) => p.word === word);
+  if (!pair) return "";
+  return match[1] + pair.command + line.slice(match[0].length);
+}
+
+/**
+ * Commands found by their plain word rather than their name, for the first word
+ * of a line.
+ *
+ * The suggestion carries the *command* as its text and the *word* as its hint,
+ * which is the way round that teaches: the strip shows `rm` labelled "remove",
+ * so the name is what lands on the line and what is read back next time.
+ *
+ * @param {string} token  What has been typed of the word.
+ * @param {number} start  Column the token starts at.
+ * @returns {Suggestion[]}
+ */
+function wordMatches(token, start) {
+  const lower = token.toLowerCase();
+  /** @type {Suggestion[]} */
+  const out = [];
+  const seen = new Set();
+  for (const { word, command } of WORD_PAIRS) {
+    // Already typed the command itself — there is nothing to find.
+    if (command === lower || !word.startsWith(lower) || seen.has(command)) continue;
+    seen.add(command);
+    out.push({ text: command, hint: word, start });
+  }
+  return out;
 }
 
 /**

@@ -1,16 +1,20 @@
 // Self-check for input.js. Plain node, no test framework:
 //   node src/lib/input.check.mjs
 import assert from "node:assert/strict";
+import { COMMAND_NAMES } from "./parse.js";
 import {
+  COMMAND_WORDS,
   completionRequest,
   completions,
   quotePath,
   resolveDir,
   runOptions,
   segments,
+  shortCwd,
   step,
   tokenAt,
   unquote,
+  wordCommand,
   wordSuggestions,
 } from "./input.js";
 
@@ -143,6 +147,76 @@ assert.deepEqual(
   texts(wordSuggestions("git status --sh", 15, ["git status --short"], CMDS, SUBS)),
   ["git status --short"],
 );
+
+// ── the shortened cwd ──────────────────────────────────────────────────────
+// The last three segments are the answer to "where am I"; everything above
+// them is one dot each, so the depth survives even though the names do not.
+assert.equal(shortCwd("C:/Users/vadim/source/VADOS/src/lib"), "..../VADOS/src/lib");
+// Under the limit is left entirely alone.
+assert.equal(shortCwd("C:/Users/vadim"), "C:/Users/vadim");
+// Over the limit with nothing above the last three: still whole, because there
+// is nothing to elide and a dot in place of a name it never had would be a lie.
+assert.equal(
+  shortCwd("C:/a-very-long-single-folder-name/x"),
+  "C:/a-very-long-single-folder-name/x",
+);
+// The separator the shell reported is the one shown — the bar must not
+// disagree with the line the user would type.
+assert.equal(shortCwd("C:\\Users\\vadim\\source\\VADOS\\src\\lib"), "....\\VADOS\\src\\lib");
+// A POSIX path's leading `/` is an empty first segment, and it counts as depth
+// like any other.
+assert.equal(shortCwd("/home/vadim/source/vados/src/lib"), "..../vados/src/lib");
+// The threshold is a parameter, not a constant baked into the shape.
+assert.equal(shortCwd("a/b/c/d/e", 5), "../c/d/e");
+
+// ── commands found by their plain word ─────────────────────────────────────
+// The point of the table: the word is what is typed, the command is what lands
+// on the line, and the hint says which word found it.
+const rm = wordSuggestions("remo", 4, [], CMDS, SUBS)[0];
+assert.equal(rm.text, "rm");
+assert.equal(rm.hint, "remove");
+assert.equal(rm.start, 0);
+// Two words for one command, so a shared prefix must not offer it twice.
+assert.deepEqual(texts(wordSuggestions("re", 2, [], CMDS, SUBS)), ["rm", "mv", "sed", "curl"]);
+// Names come first: someone typing `c` most likely means the name they know.
+assert.equal(wordSuggestions("c", 1, [], CMDS, SUBS)[0].text, "cargo");
+// Only the first word. Past it the strip is completing arguments, and an
+// argument is not a command whatever it is spelled like.
+assert.deepEqual(wordSuggestions("git remo", 8, [], CMDS, SUBS), []);
+// Typing the command itself is not a word lookup — nothing left to find.
+assert.deepEqual(
+  wordSuggestions("rm", 2, [], CMDS, SUBS).filter((s) => s.text === "rm"),
+  [],
+);
+// Every word maps to a command that exists, or the strip teaches a name the
+// parser does not know and nothing else in the app will recognise.
+for (const [command] of Object.entries(COMMAND_WORDS)) {
+  assert.ok(COMMAND_NAMES.includes(command), `${command} is not a known command`);
+}
+
+// ── the word that is submitted becomes the command ─────────────────────────
+// The word is swapped, the arguments are carried through untouched.
+assert.equal(wordCommand("list"), "ls");
+assert.equal(wordCommand("remove -r build"), "rm -r build");
+assert.equal(wordCommand("  delete x"), "  rm x");
+// Case is the user's; the lookup is not.
+assert.equal(wordCommand("REMOVE x"), "rm x");
+// Exact words only. Half a word is the strip's business, not the sender's.
+assert.equal(wordCommand("remo x"), "");
+assert.equal(wordCommand("removed.txt"), "");
+// Past the first word nothing is read: an argument spelled like a word is an
+// argument, and rewriting it would edit somebody's data.
+assert.equal(wordCommand("git remove x"), "");
+assert.equal(wordCommand("rm list"), "");
+// The command itself is already the command.
+assert.equal(wordCommand("ls -la"), "");
+assert.equal(wordCommand(""), "");
+// `WORD_ONLY`: every one of these runs something on some platform, so it is
+// never taken away from the shell. This is the check that keeps the table
+// honest — a word added without thinking lands here.
+for (const word of ["copy", "move", "rename", "kill", "clear", "find"]) {
+  assert.equal(wordCommand(`${word} a b`), "", `${word} must reach the shell untouched`);
+}
 
 // ── `..` is a completion, not a listing ────────────────────────────────────
 // It is in no directory listing and is the one directory everybody needs. Its

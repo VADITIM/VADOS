@@ -16,11 +16,19 @@
   // `COMMAND_NAMES` / `SUBCOMMAND_NAMES` are the parser's curated lists, reused
   // by the input bar's ghost completion — the parser already had to know what a
   // command looks like to render one, and a second list would drift from it.
-  import { COMMAND_NAMES, SUBCOMMAND_NAMES, parse, runHint, toMarkdown } from "$lib/parse.js";
+  import {
+    COMMAND_NAMES,
+    SUBCOMMAND_NAMES,
+    exitLabel,
+    lineParts,
+    parse,
+    runHint,
+    toMarkdown,
+  } from "$lib/parse.js";
   // Which reveal a run of parsed text gets, and in what order — read off the
   // classes the parser's own decisions put on it. Checked without a browser:
   // `node src/lib/reveal-plan.check.mjs`.
-  import { labelGroups, splittable } from "$lib/reveal-plan.js";
+  import { labelGroups, revealRank } from "$lib/reveal-plan.js";
   // The one animation value shared between two surfaces — the settings overlay
   // and the suggestion strip arrive the same way on purpose.
   import { GLITCH_IN } from "$lib/anim.js";
@@ -52,9 +60,11 @@
     resolveDir,
     runOptions,
     segments,
+    shortCwd,
     step,
     tokenAt,
     unquote,
+    wordCommand,
     wordSuggestions,
   } from "$lib/input.js";
 
@@ -271,6 +281,52 @@
     term?.focus();
   }
 
+  /**
+   * Whether an element is allowed to hold the keyboard instead of the input.
+   *
+   * Exactly one thing qualifies: a real text field, which today means the
+   * settings panel's startup-directory box, and tomorrow whatever inline
+   * control a rendered block grows. Everything else in this app — every panel
+   * button, every block, the scrollport itself — is pointer-driven and has no
+   * use for the caret, so holding it is only ever a way to lose it.
+   */
+  function wantsKeyboard(el: Element | null | undefined) {
+    return !!el?.closest?.('input, textarea, select, [contenteditable="true"]');
+  }
+
+  /**
+   * The input keeps the keyboard, whatever was clicked.
+   *
+   * A webview hands focus to whatever was clicked, and most of what is clickable
+   * here is a button that does its work on the click and then sits there holding
+   * the caret. That is what "the caret is still blinking and typing does
+   * nothing" was: the blink is the *mirror's* caret, drawn from the shell's
+   * screen, and it says nothing about which element the keyboard is pointed at.
+   *
+   * `focusout` rather than a click handler, because the ways focus leaves are
+   * open-ended — a click, a drag, a webview dialog, a panel unmounting under the
+   * pointer — and every one of them ends here. Checked after the fact rather
+   * than from `relatedTarget`: focus moving to nothing at all reports `null`,
+   * which is the most common case and the one a `relatedTarget` test misses.
+   */
+  function keepFocus() {
+    queueMicrotask(() => {
+      if (wantsKeyboard(document.activeElement)) return;
+      if (document.activeElement === term?.textarea) return;
+      term?.focus();
+    });
+  }
+
+  /**
+   * A click anywhere is a new caret position, so it ends a selection — the same
+   * rule every text field follows. The double-click that *starts* one fires its
+   * own `click` first, so this runs before it and cannot undo it.
+   */
+  function clickAway() {
+    selectAll = false;
+    refocus();
+  }
+
   let mode = $state<"blocks" | "raw">("blocks");
   let blocks = $state<Block[]>([
     { id: 0, cwd: "", command: "", buffer: banner, closed: true, exitCode: null, md: false },
@@ -301,8 +357,26 @@
    * Empty when `to <= from`. Read off the screen cells, not off any shell's
    * key bindings — see the scan in the write callback.
    */
-  let selFrom = $state(0);
-  let selTo = $state(0);
+  let shellSelFrom = $state(0);
+  let shellSelTo = $state(0);
+  /**
+   * The whole line selected by *us* — Ctrl+A, or a double-click on the bar.
+   *
+   * The shell is not told. A select-all keystroke is bound differently in every
+   * line editor (PSReadLine's `SelectAll`, readline's `beginning-of-line`), and
+   * sending one to find out is how a terminal that hosts more than one shell
+   * gets it wrong; the gesture also has to work for a *pointer*, which no shell
+   * has a binding for at all. So the selection is ours, it is drawn from the
+   * mirror, and the edit that follows is played back to the shell as the keys
+   * that produce it — see `eraseSelection`.
+   *
+   * A boolean rather than a range: both gestures mean the whole line, and a
+   * range would be state to keep in step with a line the shell can rewrite
+   * under us at any moment.
+   */
+  let selectAll = $state(false);
+  const selFrom = $derived(selectAll ? 0 : shellSelFrom);
+  const selTo = $derived(selectAll ? input.length : shellSelTo);
   // The caret splits the line into two runs, and each is segmented against the
   // same absolute range so the selection cannot swallow the caret between them.
   const headSegments = $derived(segments(input.slice(0, cursorCol), 0, selFrom, selTo));
@@ -903,16 +977,21 @@
         "Up / Down — move through the matches shown above the input",
         "Tab or Right arrow — take the selected match. Enter always runs the line",
         "Up / Down at an empty prompt — the shell's own history, untouched",
+        "Type what a command does — remove, list, search, download — and the matches show the command that does it",
+        "Running one of those words runs the command: `remove x` sends `rm x`, and the block shows what ran. Words that are already commands somewhere — copy, move, rename, kill, find — are never swapped",
         ".. completes like any folder, so cd .. is one Tab away",
         "Ctrl + B — show the current folder in a panel on the right, as a tree",
         "Click a folder in the panel, or its arrow, to open it. Shift + click puts `cd` at the prompt",
         ".. at the top of the panel goes up a folder, the same way",
         "Click a file in the panel for the same options a file dropped on the window gets",
         "Drag a file out of the panel into any other app to open it there. It is never moved",
+        "Ctrl + A — select the whole input line. Backspace deletes it, typing replaces it",
+        "Double-click the input bar — the same selection, from the pointer",
         "Ctrl + Up / Down — select a past command block, or click one",
         "Ctrl + Shift + C — copy the selected block, Ctrl + Shift + M as markdown",
         "Ctrl + C — stop the running command",
-        "Esc — dismiss a suggestion, deselect a block, or open and close settings",
+        "Shift + Esc — open and close settings",
+        "Esc — dismiss a suggestion, deselect a block, or close settings. With nothing open it goes to the shell, which clears the line",
         "F2 — capture a screenshot",
         "F3 — toggle the debug overlay",
         "Right-click a block — copy its output",
@@ -1013,6 +1092,20 @@
   const snapRead = new Map<number, { fromY: number; y: number; text: string; glued: boolean; end: number }>();
   /** Rows re-read on every pass regardless. See below. */
   const SNAP_SLACK = 2;
+  /**
+   * Whether the last line of the open block was finished when it was last read.
+   *
+   * The reveal holds its character split off the element output is still being
+   * *appended* to — and that is only true while a line is unfinished. A program
+   * that writes a whole row and a newline (`ping`, `ls`, every list there is)
+   * has nothing more to put in the element the row landed in, and the cursor
+   * standing at column 0 is the program's own statement of that.
+   *
+   * Read here rather than at reveal time on purpose: this is the same buffer
+   * read the rendered text came from, so it describes the DOM that exists. The
+   * cursor a frame later describes a screen that may already have moved on.
+   */
+  let tailComplete = true;
 
   // A block's text is read back out of xterm's screen buffer rather than
   // accumulated from the raw stream. xterm has already applied every escape
@@ -1027,6 +1120,7 @@
     const buf = term.buffer.active;
     const end = buf.baseY + buf.cursorY;
     const cols = term.cols;
+    tailComplete = buf.cursorX === 0;
 
     let from = snapRead.get(block.id);
     // The marker moved (the buffer trimmed under us) or the block got shorter
@@ -1318,7 +1412,19 @@
         // block as one the reveal must not character-split. Set once and left:
         // a program that has repainted will repaint again, and the attribute is
         // read by the reveal pass rather than by anything with a lifetime.
-        el.setAttribute("data-repaint", "");
+        //
+        // **A line is not a screen.** A program erasing the line it is standing
+        // on — every progress spinner does, `npm ls` most visibly — costs the
+        // block one row, and reading that as a redraw took the character wave
+        // off the entire command: the spinner ran for a second, and the tree
+        // that landed after it was flagged unsafe to split for the rest of its
+        // life. The last element is held back on its own account either way
+        // (`growingEdge`), and that is where a rewrite in place actually lands.
+        //
+        // ponytail: measured in rows, not intent. A pager loses a screenful, a
+        // spinner loses its own line, and nothing in between has come up.
+        const row = parseFloat(getComputedStyle(el).lineHeight) || 20;
+        if (before - height > row * 2) el.setAttribute("data-repaint", "");
         syncTail(el, "shrink");
       }
     });
@@ -2004,26 +2110,201 @@
   // #endregion ────────────────────────────────────────────────────────────────
 
   /**
-   * The one Esc handler. Raw mode is exempt — Esc is how you leave vim's insert
-   * mode, and a terminal that eats it is broken in a way no settings panel pays
-   * for.
+   * Delete the whole selected line, as the keys that would have done it.
+   *
+   * The shell owns the line; we own the selection. So the edit is expressed the
+   * only way the shell will accept one — backspaces for everything left of the
+   * caret, deletes for everything right of it. Same move `acceptMenu` makes to
+   * replace a half-typed word, and the reason both work for any shell is that
+   * neither depends on a binding: `\x7f` and `CSI 3~` are what a real keyboard
+   * sends.
+   *
+   * `after` rides along in the same write so a typed character that replaces the
+   * selection cannot arrive before the erase it replaces.
    */
-  function onEscape(e: KeyboardEvent) {
-    if (e.key !== "Escape" || mode === "raw") return;
-    e.preventDefault();
-    // Innermost thing first. Esc with the suggestion strip open means "not that
-    // one", not "open the settings" — dismissing it must not also cost a panel.
+  function eraseSelection(after = "") {
+    const del = Math.max(0, input.length - cursorCol);
+    invoke("pty_write", { data: "\x7f".repeat(cursorCol) + "\x1b[3~".repeat(del) + after });
+    selectAll = false;
+  }
+
+  /** Select the whole input line, from the pointer. Ctrl+A's other half. */
+  function selectInput() {
+    if (mode === "raw" || !atPrompt || !input.length) return;
+    document.getSelection()?.removeAllRanges();
+    selectAll = true;
+    term?.focus();
+  }
+
+  /**
+   * The bytes a key would have put on the wire, for the one case where it can
+   * never be put there by the terminal itself: the event was delivered to
+   * whatever was clicked last, and an event is not delivered twice.
+   *
+   * **Ctrl+letter is the control byte, and it is the reason this exists.**
+   * `\x03` is the interrupt — the key a reader reaches for when a program will
+   * not stop — and a terminal that drops it because the keyboard had drifted
+   * onto a `<section>` is broken in the way that matters most. Ctrl+D, Ctrl+Z
+   * and the rest come out of the same arithmetic.
+   *
+   * Deliberately not a general key encoder: arrows, function keys and anything
+   * needing the application-cursor modes are xterm's job, and by the time one
+   * of those is pressed the `focus()` beside this call has already put the
+   * keyboard back for every key after it.
+   */
+  function keyBytes(e: KeyboardEvent): string {
+    if (e.altKey || e.metaKey) return "";
+    if (e.ctrlKey) {
+      return /^[a-zA-Z]$/.test(e.key)
+        ? String.fromCharCode(e.key.toUpperCase().charCodeAt(0) & 0x1f)
+        : "";
+    }
+    if (e.key.length === 1) return e.key;
+    return { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b" }[e.key] ?? "";
+  }
+
+  /**
+   * Keys VAD/OS answers itself in block mode, so they are never written through
+   * to the shell by the recovery above — the handlers below own them, and they
+   * run whether or not the keyboard had drifted.
+   *
+   * Raw mode has no entry here on purpose: a full-screen app owns its keyboard
+   * outright, including Esc and Tab.
+   */
+  function appKey(e: KeyboardEvent) {
+    if (e.key === "Escape" || e.key === "Tab" || e.key === "F2" || e.key === "F3") return true;
+    if (!e.ctrlKey || e.altKey) return false;
+    if (e.shiftKey) return /^[cCmM]$/.test(e.key);
+    return /^[aAbB]$/.test(e.key);
+  }
+
+  /**
+   * The window's own keys: Esc, Tab and Ctrl+A.
+   *
+   * All three are on `svelte:window` in the capture phase rather than in
+   * xterm's key handler, and for one reason — xterm's handler sits on its own
+   * textarea, so it does nothing whenever anything else holds focus. That is
+   * fine for a key the shell should get anyway, and wrong for these three,
+   * which must behave the same whatever was last clicked.
+   *
+   * Raw mode is exempt throughout: a full-screen app owns its keyboard.
+   */
+  function onAppKey(e: KeyboardEvent) {
+    // A real text field is being typed into, so every key here is its own —
+    // except Esc, which is how the panel holding it is closed.
+    if (wantsKeyboard(document.activeElement)) {
+      if (e.key !== "Escape") return;
+    }
+    // **A keystroke always reaches the program, even the first one after focus
+    // went somewhere else.** `keepFocus` puts the keyboard back on every way out
+    // it can see, and this is the case it cannot: focus that was already gone
+    // when the key was pressed. Taking it back is not enough on its own — the
+    // event has already been delivered to the wrong element and will not be
+    // delivered again — so the key is written through by hand rather than
+    // silently dropped.
+    //
+    // **This runs in raw mode too, and it is not restricted to the prompt.**
+    // Both of those were holes in the same guard, and both of them were the
+    // reported "I have to press Ctrl+C or q four times": the recovery sat
+    // behind an early return for raw mode, so nothing at all put the keyboard
+    // back during `htop` or `vim`, and behind `atPrompt`, so every key pressed
+    // while a command was *running* — which is every key that stops one — was
+    // dropped. A key that ends a program is exactly the key most likely to be
+    // pressed after clicking around in its output.
+    else if (term && document.activeElement !== term.textarea) {
+      term.focus();
+      const bytes = mode === "raw" || !appKey(e) ? keyBytes(e) : "";
+      if (bytes) {
+        e.preventDefault();
+        // The selection is ours and the shell knows nothing about it, so a
+        // character typed over it is an erase plus that character.
+        if (mode !== "raw" && selectAll && !e.ctrlKey && e.key.length === 1) {
+          eraseSelection(bytes);
+        } else {
+          // Everything `t.onData` would have done for a key it never saw. An
+          // abort stops the output the reveal is walking through, so the same
+          // interrupt rule applies however the byte was produced.
+          if (bytes.includes("\x03")) killReveals();
+          invoke("pty_write", { data: bytes });
+        }
+        return;
+      }
+    }
+
+    if (mode === "raw") return;
+
+    // **Tab never moves focus.** The output is a transcript, not a form: there
+    // is nothing in it to tab *to*, but a link in a block is focusable and the
+    // panel is full of buttons, so the browser was happy to walk the caret out
+    // of the input and into the scrollback. Everything about Tab belongs to the
+    // input — it is how a suggestion is taken — so it is taken outright here,
+    // before focus can move, and handled in full rather than handed on.
+    if (e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation();
+      term?.focus();
+      if (!atPrompt) return;
+      if (menuOpen) acceptMenu();
+      else openCompletions();
+      return;
+    }
+
+    // **Ctrl+A means the input line, never the page.** Unintercepted it is the
+    // webview's select-all, which selects the entire scrollback — every block
+    // on screen highlighted, and a Backspace after it doing nothing to any of
+    // them, because none of that text is editable by anyone. It is not sent to
+    // the shell either; see `selectAll`.
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && /^[aA]$/.test(e.key)) {
+      e.preventDefault();
+      e.stopPropagation();
+      term?.focus();
+      if (atPrompt && input.length) selectAll = true;
+      return;
+    }
+
+    if (e.key !== "Escape") return;
+
+    /** Taken by us: the shell must not also receive it. */
+    const take = () => {
+      e.preventDefault();
+      // Capture phase on the window, so this is what keeps the key away from
+      // xterm's textarea below — nothing further down the tree ever sees it.
+      e.stopPropagation();
+    };
+
+    // **Shift+Esc opens the panel; bare Esc only ever leaves something.**
+    // Opening a panel is not what Esc means anywhere else, and it cost the
+    // shell a key it uses: PSReadLine clears the line with Esc, and so does
+    // readline's `\e`. Bare Esc with nothing open now goes back to the shell.
+    if (e.shiftKey) {
+      take();
+      toggleSettings();
+      return;
+    }
+    // Innermost thing first, in the order the user is inside them. A panel is
+    // outermost: Esc closes it even though Esc no longer opens it, because a
+    // surface that traps the keyboard has to be leavable by the key everything
+    // else is left by.
+    if (selectAll) {
+      take();
+      selectAll = false;
+      return;
+    }
     if (menuOpen) {
+      take();
       closeMenu();
       return;
     }
-    // Same rule one layer out: a selected block is a state the user is in, and
-    // Esc is how any state is left before it is how a panel is opened.
     if (focusedId !== null) {
+      take();
       focusedId = null;
       return;
     }
-    toggleSettings();
+    if (settingsOpen) {
+      take();
+      closeSettings();
+    }
+    // Nothing to leave: Esc is the shell's, untouched.
   }
 
   // Enter/exit only — the block-entrance timing from ANIMATION.md (autoAlpha
@@ -2618,11 +2899,14 @@
       if (!r.width || !r.height) continue;
       const bar = document.createElement("div");
       bar.className = "reveal-bar";
-      // A warning is red whatever the accent is: the one colour in the app that
-      // is not the user's to theme, because it is the colour of the thing it
-      // reports and not of the terminal. `closest`, so a warning *block* paints
-      // every bar inside it, not only the heading that carries the class.
-      if (node.closest(".warn")) bar.classList.add("warn");
+      // A status is red or green whatever the accent is: the two colours in the
+      // app that are not the user's to theme, because they are the colour of the
+      // thing being reported and not of the terminal. The bar carries it too —
+      // a green `done` swept by a purple bar says two things at once, and only
+      // one of them is true. `closest`, so a warning *block* paints every bar
+      // inside it, not only the heading that carries the class.
+      const status = node.closest(".warn, .err, .ok");
+      if (status) bar.classList.add(status.classList.contains("ok") ? "ok" : "warn");
       // Viewport rect → scroll-content coordinates. The overlay is absolutely
       // positioned inside the scrollport, so it scrolls with the content and the
       // bar stays over its element if the view moves mid-wipe.
@@ -2911,6 +3195,7 @@
     }
 
     const tiers = labelsIn(node);
+    const base = revealRank(node.classList) * LABEL_STEP;
     const clipped = tiers.flat();
     const labels = new Set<Element>(clipped);
     // The element being a label itself — a heading is one, whole — means there
@@ -2928,14 +3213,7 @@
     // are safe either way — they are overlay divs, and the only thing they write
     // into the element is a `clipPath` that a re-render simply drops.
     //
-    // `splittable` is the other half of the question, and it is a style call
-    // rather than a safety one: a list's text is parallel rows, so a wave that
-    // crosses it reads as one ribbon of characters instead of a set of items.
-    // It rises as one piece through the same branch a live element takes.
-    const split =
-      live || labels.has(node) || !splittable(node.classList)
-        ? null
-        : splitChars(node, labels);
+    const split = live || labels.has(node) ? null : splitChars(node, labels);
     const bars: HTMLElement[] = [];
 
     function done() {
@@ -2972,7 +3250,12 @@
     // tier. One beat past the last tier's start, which is inside that tier's own
     // retreat: the wave begins as the last bar is clearing its text, not after a
     // gap.
-    const waveAt = tiers.length * LABEL_STEP;
+    //
+    // `base` is the element's own place in the same ranking — a list row, then
+    // prose, then a code block last of all — and it offsets the *whole* reveal,
+    // labels included, so a block's flags and paths still sweep in tier order
+    // inside its late slot rather than being flattened into it.
+    const waveAt = base + tiers.length * LABEL_STEP;
 
     if (split) {
       tl.to(
@@ -3007,7 +3290,7 @@
       return made;
     }
 
-    let at = 0;
+    let at = base;
     for (const tier of tiers) {
       // ponytail: past this many labels the tier opens without bars. Fifty flags
       // in a `--help` dump is fifty absolutely positioned divs for half a
@@ -3176,8 +3459,16 @@
     //    gets shorter when a program is redrawing its own screen, and a redraw
     //    rewrites all of it — `less` repaints on every keypress. Once a block
     //    has done that it is assumed to keep doing it, because it will.
+    //
+    // **And the tail is only held while its line is unfinished.** Appending is
+    // the hazard, not being last, and a row that arrived with its newline is
+    // not going to be appended to. Holding every tail is what left `ping` with
+    // no wave on any row: each row is the tail at the instant it lands, so the
+    // only one that ever waved was the last, revealed after the block had
+    // closed and released them all. `tailComplete` is read off the same buffer
+    // pass the text came from.
     const repainting = open?.hasAttribute("data-repaint") ?? false;
-    const edge = open && !repainting ? growingEdge(open) : null;
+    const edge = open && !repainting && !tailComplete ? growingEdge(open) : null;
     passView = scrollEl?.getBoundingClientRect();
     try {
       for (const node of [...revealed.keys()]) {
@@ -3219,31 +3510,8 @@
   // #endregion ────────────────────────────────────────────────────────────────
 
   /**
-   * A block's result line, which only ever mounts when the command finishes —
-   * so the entrance *is* the completion pulse. Success and failure get the same
-   * motion; the colour already carries the difference, and making failure
-   * animate harder would be saying it twice.
-   */
-  function resultPulse(node: HTMLElement) {
-    if (!reduceMotion) {
-      gsap.from(node, {
-        autoAlpha: 0,
-        scale: 1.16,
-        duration: 0.3,
-        ease: "power2.out",
-        transformOrigin: "left center",
-        clearProps: "transform,opacity,visibility",
-      });
-    }
-    return {
-      destroy() {
-        gsap.killTweensOf(node);
-      },
-    };
-  }
-
-  /**
-   * The indeterminate bar shown while a command has produced nothing yet.
+   * The indeterminate bar shown at the foot of a block for as long as its
+   * command runs.
    *
    * Ambient tier: it says "still working", it is not asking to be looked at, so
    * it is slow and low-contrast and never competes with output arriving beside
@@ -3609,7 +3877,8 @@
    * Enter would have taken over running commands.
    */
   function menuOwns(key: string) {
-    if (key === "Tab") return true;
+    // Tab is not here: it is taken on the window, in the capture phase, so that
+    // it cannot move focus into the output no matter what currently has it.
     if (!menuOpen) return false;
     if (key === "Enter") return !menuAuto;
     return key === "ArrowUp" || key === "ArrowDown";
@@ -3655,6 +3924,23 @@
     // so a window handler would still let F2 through to the shell.
     // Returning false is xterm's documented "I handled this, you don't".
     t.attachCustomKeyEventHandler((e) => {
+      // A selected line, and a key that would edit it. The selection is ours,
+      // so the shell has no idea the line is selected and would treat every one
+      // of these as an ordinary edit at the caret — which is exactly what "I
+      // selected everything and pressed Backspace and one character went away"
+      // was. Replayed as the keys that produce the edit instead; see
+      // `eraseSelection`.
+      if (mode !== "raw" && selectAll && e.type === "keydown") {
+        const typed = e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey;
+        if (e.key === "Backspace" || e.key === "Delete" || typed) {
+          e.preventDefault();
+          eraseSelection(typed ? e.key : "");
+          return false;
+        }
+        // Anything else — an arrow, Enter, Home — is a move, and a move is what
+        // ends a selection everywhere else. The key itself is the shell's.
+        if (!/^(Shift|Control|Alt|Meta)$/.test(e.key)) selectAll = false;
+      }
       // The suggestion strip owns these keys before the shell sees them. It has
       // to be here rather than on the window: xterm turns a keydown into bytes
       // on the wire from its own listener, so a handler that only stops the
@@ -3663,13 +3949,7 @@
       if (mode !== "raw" && atPrompt && menuOwns(e.key)) {
         e.preventDefault();
         if (e.type === "keydown") {
-          // Tab takes the ghost when there is one. It is the completion already
-          // on screen, so Tab confirming it is the shortest path from what is
-          // shown to what is meant — and the strip is the same answer wearing a
-          // second row. The strip is still there for everything the ghost has
-          // no single obvious answer for; see tasks.md for the cost.
-          if (e.key === "Tab") menuOpen ? acceptMenu() : openCompletions();
-          else if (e.key === "Enter") acceptMenu();
+          if (e.key === "Enter") acceptMenu();
           else moveMenu(e.key === "ArrowDown" ? 1 : -1);
         }
         return false;
@@ -3679,21 +3959,13 @@
       // capture handler has already closed the strip by the time this runs.
       if (menuOpen && e.type === "keydown" && e.key !== "Escape") closeMenu();
 
-      // Esc belongs to the shell first. In raw mode it is how you leave vim's
-      // insert mode, so it is never intercepted there — a terminal that eats
-      // Esc is broken in a way no settings panel pays for. In block mode it
-      // opens the panel, which costs PSReadLine's clear-line binding; see
-      // tasks.md, that trade is recorded rather than assumed.
-      //
-      // Only the swallow lives here. The toggle itself is on `svelte:window`,
-      // because this handler sits on xterm's textarea and therefore does
-      // nothing at all whenever xterm is not the focused element — which is
-      // every moment after a click inside the settings panel, and is exactly
-      // why Esc "sometimes" did not close it.
-      if (e.key === "Escape" && mode !== "raw") {
-        if (e.type === "keydown") e.preventDefault();
-        return false;
-      }
+      // **Esc is not swallowed here any more, and that is the point.** It
+      // belongs to the shell — PSReadLine clears the line with it, and in raw
+      // mode it is how vim leaves insert mode. The panel moved to Shift+Esc,
+      // and everything bare Esc still does (drop a selection, close the strip,
+      // deselect a block, close the panel) is taken on the window in the
+      // capture phase, which stops the event before it can reach this handler
+      // at all. So an Esc that arrives here is one nothing above wanted.
 
       // Block navigation and the keyboard copy. Both are chords rather than
       // bare keys, and deliberately: a bare Up/Down is the shell's history and
@@ -3779,8 +4051,9 @@
         betweenCommands = false;
         promptReady = false;
         input = "";
-        selFrom = 0;
-        selTo = 0;
+        shellSelFrom = 0;
+        shellSelTo = 0;
+        selectAll = false;
         pendingCommand = "";
         // The command that just finished is exactly the thing that creates and
         // deletes files, so a listing taken before it is not evidence about the
@@ -3796,7 +4069,16 @@
         // callback runs the cursor has already moved onto the prompt row.
         const block = currentBlock();
         if (block && !block.closed) {
-          snapshot(block);
+          // Re-read from the marker, not from where the last pass stopped. The
+          // incremental read assumes a row behind the tail never changes again,
+          // and a program with a progress line breaks exactly that: `npm ls`
+          // draws a spinner, that row is committed as `\`, and then the line is
+          // erased and rewritten with the real output — which the incremental
+          // read never goes back for, so the block kept the spinner frame and
+          // nothing else. One full pass at the end costs a single walk of the
+          // block's rows, once per command, and makes the committed text right
+          // whatever was drawn over it.
+          snapshot(block, true);
           // The command is over, so there is provably nothing more to wait for.
           showNow(block);
         }
@@ -3949,8 +4231,8 @@
             cursorCol = Math.max(0, (cursorRow - start) * t.cols + buf.cursorX - promptWidth);
             // Same offset for the selection: it was measured in screen columns
             // and the bar renders input columns.
-            selFrom = selStart < 0 ? 0 : Math.max(0, selStart - promptWidth);
-            selTo = selStart < 0 ? 0 : Math.max(0, selEnd - promptWidth);
+            shellSelFrom = selStart < 0 ? 0 : Math.max(0, selStart - promptWidth);
+            shellSelTo = selStart < 0 ? 0 : Math.max(0, selEnd - promptWidth);
             // The rows above are read untrimmed, so everything past the typed
             // text is the screen's own blank padding and has to come off. A
             // trailing space the user actually typed is indistinguishable from
@@ -4017,11 +4299,23 @@
         pendingCommand += nl === -1 ? data : data.slice(0, nl);
       }
       if (atPrompt && promptReady && data.includes("\r")) {
+        // A plain word standing where a command goes is swapped for the command
+        // as the line leaves — the one place VAD/OS edits what it sends, and it
+        // edits exactly one word of it. See `wordCommand`.
+        //
+        // **Only when Enter arrived on its own.** A paste carries its whole line
+        // in the same chunk as the `\r`, and the mirror is a keystroke behind it
+        // — the fallback below exists for precisely that race. Rewriting from a
+        // line we are not sure of would send something nobody typed, so the swap
+        // is confined to the case where the screen is known to be current.
+        const swap = data === "\r" ? wordCommand(input) : "";
         // Prefer the mirrored, edited screen text when it arrived in time;
         // fall back to the raw send buffer when it didn't (paste race above).
-        const command = (input.trim() || pendingCommand.trim());
+        const command = (swap.trim() || input.trim() || pendingCommand.trim());
         const local = command ? localCommand(command) : undefined;
         const typed = input.length || pendingCommand.length;
+        const line = input;
+        const col = cursorCol;
         if (command) {
           // Local commands too: `open` and `clear` are typed as often as
           // anything the shell runs, and a history that skips them is a history
@@ -4055,6 +4349,22 @@
           // no command ran and no new prompt will be drawn, so the input bar has
           // to keep mirroring the same live row.
           invoke("pty_write", { data: "\x7f".repeat(typed) });
+          return;
+        }
+        if (swap) {
+          // The word was typed into the shell's line editor keystroke by
+          // keystroke and cannot be unsent, so the line is erased the way a
+          // selection is — back to the start, then forward — and the swapped
+          // line is written in its place before the Enter that runs it. The
+          // shell therefore echoes, records and reports the real command, and
+          // the block head is the truth about what ran rather than a label.
+          invoke("pty_write", {
+            data:
+              "\x7f".repeat(col) +
+              "\x1b[3~".repeat(Math.max(0, line.length - col)) +
+              swap +
+              "\r",
+          });
           return;
         }
       }
@@ -4151,7 +4461,7 @@
      while xterm's textarea has focus, so any click inside the panel silently
      disarmed the key. `capture` so a focused control inside the panel cannot
      consume it first. -->
-<svelte:window onfocus={refocus} onkeydowncapture={onEscape} />
+<svelte:window onfocus={refocus} onfocusoutcapture={keepFocus} onkeydowncapture={onAppKey} />
 
 <!-- The font mode resolves to two custom properties here and nothing reads the
      mode itself, so every consumer below is `var(--font-outside)` or
@@ -4161,7 +4471,7 @@
   bind:this={appEl}
   style:--font-outside={FONT_MODES[fontMode].outside}
   style:--font-inside={FONT_MODES[fontMode].inside}
-  onclick={refocus}
+  onclick={clickAway}
   role="presentation"
 >
   {#if notice}
@@ -4243,7 +4553,8 @@
                      in, so every row after that appeared with no animation at
                      all. One action per `<li>` means a row animates when it
                      arrives, which is the same rule everything else in a block
-                     follows. -->
+                     follows. The row waves like any other prose, one rank ahead
+                     of it (`waveRank`). -->
                 <ul class="md-list">
                   {#each node.items as item}
                     <li class="md-row" use:reveal>{item}</li>
@@ -4274,14 +4585,29 @@
                 <!-- A link is the one token that is also a control, so it is an
                      `<a>` rather than a styled `<code>`. `href` is the matched
                      text itself and the match starts at `http`, so a scheme
-                     Tauri would refuse to open cannot get in here. -->
-                <pre class="block-body" class:bold={node.bold} use:reveal>{#each node.parts as part}{#if part.kind === "link"}<a class="inline-link" href={part.text} target="_blank" rel="noreferrer">{part.text}</a>{:else if part.code}<code class="inline-code {part.kind ?? ''}">{part.text}</code>{:else}{part.text}{/if}{/each}</pre>
+                     Tauri would refuse to open cannot get in here.
+
+                     **The reveal is per line, not on the `<pre>`.** An element
+                     animates once, on the chunk it mounted in, so a paragraph
+                     rendered as one element animated when its first line landed
+                     and every line after that simply appeared — which is what a
+                     loop printing a number a second looked like. A line is what
+                     arrives, so a line is what animates; the `<pre>` is the box
+                     around them and is already on screen. The newline between
+                     two lines is a real character because they sit in a `pre` —
+                     a margin would be a different layout. -->
+                <pre class="block-body" class:bold={node.bold}>{#each lineParts(node.parts) as parts, i}{#if i}{"\n"}{/if}{#if parts.length}<span class="md-line" use:reveal>{#each parts as part}{#if part.kind === "link"}<a class="inline-link" href={part.text} target="_blank" rel="noreferrer">{part.text}</a>{:else if part.code}<code class="inline-code {part.kind ?? ''}">{part.text}</code>{:else}{part.text}{/if}{/each}</span>{/if}{/each}</pre>
               {/if}
             {/each}
             {#if block.closed && block.cwd}
-              <div class="block-result" class:ok={block.exitCode === 0} class:err={block.exitCode !== 0} use:resultPulse>
-                {block.exitCode === 0 ? "done" : `exit ${block.exitCode}`}
-              </div>
+              <!-- Swept, not pulsed: this is the one fully saturated run of
+                   text in the block, which is tier 0's definition, and it says
+                   the same kind of thing a status heading says. The line only
+                   ever mounts when the command finishes, so its reveal is the
+                   completion pulse — one gesture, not a second one invented for
+                   this slot. Success and failure animate identically; the
+                   colour already carries the difference. -->
+              <div class="block-result" class:ok={block.exitCode === 0} class:err={block.exitCode !== 0} use:reveal>{exitLabel(block.exitCode ?? 0)}</div>
             {:else if block.cwd}
               <!-- The result line's slot before there is a result: what the
                    command is doing, and how to get out of it. A pager is the
@@ -4290,14 +4616,15 @@
                    terminal ends up feeling stuck. Read off the pager's own
                    prompt rather than the command's name; see `runHint`. -->
               <div class="block-running">
-                <!-- A command that has produced nothing yet is the one case
-                     where a hint alone is not enough: the box is empty, so
-                     there is no evidence on screen that anything is happening
-                     at all. `npm ls --all` sits like that for seconds. Strictly
-                     *nothing shown yet* — once output exists it is its own
-                     proof of life and a bar beside it would be noise. -->
-                {#if !block.shown}<span class="run-bar" use:runBar></span>{/if}
-                <span>{runHint(block.buffer)}</span>
+                <!-- Shown for as long as the command runs, not only while the
+                     box is empty. Output is evidence that something *happened*,
+                     not that anything is still happening — a command that
+                     printed two lines and then stalled looks identical to one
+                     that finished, and the block's foot is where the reader is
+                     already looking for the result. The bar occupies that slot
+                     until the result replaces it. -->
+                <span class="run-bar" use:runBar></span>
+                <span>{runHint(block.buffer, block.command)}</span>
               </div>
             {/if}
           </section>
@@ -4465,11 +4792,28 @@
         >
       </div>
     {/if}
-    <div class="input-bar ghost" class:drop={dragOver} bind:this={inputBarEl} use:growUpward>
+    <!-- Double-click selects the line. The bar is a mirror of the shell's
+         screen, not a text field, so the browser's own double-click selection
+         is a selection of *rendered text* — it looks right, and then Backspace
+         deletes one character at the caret because that is all the shell was
+         ever told. Ours is the one the keys act on, so the browser's is
+         collapsed on the way past. -->
+    <div
+      class="input-bar ghost"
+      class:drop={dragOver}
+      bind:this={inputBarEl}
+      use:growUpward
+      ondblclick={selectInput}
+      role="presentation"
+    >
       <!-- The path is its own span so the handoff can clip it without clipping
            the mark, which lives in the same box and is the thing doing the
            clipping. -->
-      <span class="input-cwd"><span class="ghost-mark">&gt;</span> <span class="cwd-text">{promptCwd}</span></span><span class="block-sep">&nbsp;|&nbsp;</span><span class="input-text">{#each headSegments as part}<span class:sel={part.sel}>{part.text}</span>{/each}<span
+      <!-- Shortened, and the whole thing on the title: the bar is where the
+           path competes for room with what is being typed, so it shows the end
+           that answers "where am I". The block heads keep the full path — those
+           are the record of what ran and where. -->
+      <span class="input-cwd"><span class="ghost-mark">&gt;</span> <span class="cwd-text" title={promptCwd}>{shortCwd(promptCwd)}</span></span><span class="block-sep">&nbsp;|&nbsp;</span><span class="input-text">{#each headSegments as part}<span class:sel={part.sel}>{part.text}</span>{/each}<span
           class="caret"
           class:idle={!atPrompt}
           class:typing
@@ -4736,8 +5080,14 @@
     will-change: transform;
   }
 
+  /* `warn` covers `.err` as well — one class for "the bad colour", since the
+     bar has no third state to tell them apart with. */
   :global(.reveal-bar.warn) {
     background: var(--err);
+  }
+
+  :global(.reveal-bar.ok) {
+    background: var(--ok);
   }
 
   /* The typing indicator, riding the wipe's leading edge. Deliberately the same
@@ -5237,6 +5587,20 @@
     word-break: break-word;
   }
 
+  /* One line of prose, and the reveal's unit. `inline-block` because the live
+     line rises into place with a transform, and a transform does nothing at all
+     to a non-replaced inline box — the rise silently degraded to a fade the
+     moment the reveal moved off the `<pre>`. Atomic for line-breaking, so the
+     newline characters between lines still do the breaking; `max-width` is what
+     lets a line longer than the block wrap inside its own box rather than
+     running off the edge. */
+  .md-line {
+    display: inline-block;
+    max-width: 100%;
+    vertical-align: top;
+    white-space: inherit;
+  }
+
   .block-body.bold {
     font-weight: 600;
     color: var(--text-strong);
@@ -5329,6 +5693,25 @@
 
   .tok-str {
     color: var(--text-strong);
+  }
+
+  /* The same three meanings the prose tokens carry, in the same two hues — but
+     tint only. An `.inline-code.path` gets a surface and padding; a path inside
+     a block cannot, or every character after it on that row shifts. */
+  .tok-path {
+    color: var(--complement-text);
+  }
+
+  .tok-link {
+    color: var(--accent-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* A timestamp is a stamp, not content. Grey rather than tinted so a log's
+     structure reads before its text without every line carrying an accent. */
+  .tok-time {
+    color: var(--text-ghost);
   }
 
   .code-spacer {

@@ -47,7 +47,7 @@ Alt-screen detection belongs in this parser, even though it is consumed in Phase
 
 ## The OSC surface grows later
 
-Phase 2 owns OSC 133 (boundaries) and OSC 7 (cwd). [phase-8-markdown-engine.md](phase-8-markdown-engine.md) adds a third: a private-use marker by which a program declares "the following output is markdown".
+Phase 2 owns OSC 133 (boundaries) and OSC 7 (cwd). [phase-8-document-engine.md](phase-8-document-engine.md) adds a third: a private-use marker by which a program declares "the following output is markdown".
 
 Nothing to build now, but the handler registration should read as a list of independent handlers rather than one branching function, so adding the third is a registration and not a rewrite. Same rule as everything else here — the handler consumes its sequence so it never reaches the screen, and it runs mid-parse where the cursor actually is.
 

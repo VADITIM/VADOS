@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Output
+
+- A list row waves character by character like the prose around it, and does so one beat ahead of it. Rising as one piece read as a row that had failed to animate.
+- Prose animates a line at a time. A command printing a line every second — a loop, a slow build — showed the first line rising and every line after it appearing with nothing, because the whole paragraph was one element and an element animates once.
+- The bar that sweeps a result line or a status heading is that status's colour, red or green, instead of the accent.
+- A block running a pager says `q quits`. `git diff` said `ctrl+c stops`, which is the one key `less` ignores — the pager's own prompt is still read first, and a command known to page now says so even when nothing recognisable was drawn.
+- Every row of a streaming list waves as it arrives. Only the row still being written is held back now, rather than every row that was the newest at the time — which meant `ping` waved on its last reply and nothing else.
+- A column table renders as one thing. `Get-ChildItem`'s file rows begin `-a----`, which is also how a diff writes a deleted line, so a directory listing came out as prose for its folders and a fenced diff for its files, with the timestamps in between tinted.
+- Output that follows a progress spinner animates. A program erasing its own progress line — `npm ls`, `npm install` — cost the block one row, which was read as the program redrawing its whole screen and took the character wave off everything it printed afterwards.
+- A block re-reads its output in full when the command ends. A program that draws a progress line over its own output — `npm ls` — could leave the block holding a spinner frame and nothing else.
+- A code block is the last thing in a block to arrive, after the prose that introduces it, with its own flags and paths sweeping in tier order inside that slot.
+- Links, timestamps and paths inside a code block are tinted and revealed like the same shapes in prose. A stack trace is paths and a log is timestamps, and both were flat.
+- A block's result line sweeps its bar like any other status text, instead of its own scale pulse.
+- The result line says what the exit code meant — `exit 130 · stopped (ctrl+c)`, `exit 127 · command not found` — and prints Windows status codes as hex, since `exit -1978335212` and `0x8A150014` are the same number and only one of them can be looked up.
+- The bar at the foot of a running block stays for as long as the command runs. It used to disappear on the first line of output, so a command that printed two lines and stalled looked finished.
+
+### Input
+
+- Ctrl+C and any other key stops a running program on the first press. A key pressed while the keyboard had drifted onto something clicked earlier was dropped whenever a command was running, and in `vim`/`htop` nothing put the keyboard back at all — so the key that ends a program was the one most likely to be eaten.
+- Settings opens on Shift+Esc. Bare Esc still closes it, drops a selection, dismisses a suggestion and deselects a block — and with none of those open it now reaches the shell, which is where PSReadLine's clear-line went.
+- A cwd longer than 30 characters is shortened in the input bar to its last three folders, with one dot for each folder above them — `C:/Users/vadim/source/VADOS/src/lib` shows as `..../VADOS/src/lib`. The full path is the element's tooltip, and block heads still record it whole.
+- The input keeps the keyboard whatever is clicked, and a key pressed while focus had already moved is written through instead of being dropped. Clicking a panel button or a block left the caret blinking in the bar while nothing typed anywhere.
+- Ctrl+A selects the input line. It used to reach the webview, which selected the whole scrollback instead — and nothing could be done with that selection.
+- Double-clicking the input bar selects the line the same way. Backspace deletes the selection and typing replaces it; both used to act on one character at the caret.
+- Tab never moves focus into the output. A link in a block or a button in the panel could take the caret out of the input, with no way back except the mouse.
+- A command can be found by what it does: typing `remove`, `list`, `search`, `download` and the like shows the command that does it, labelled with the word that found it.
+- Running one of those words runs the command — `remove build` sends `rm build`, and the block records `rm build`, not the word. Words that are already commands somewhere (`copy`, `move`, `rename`, `kill`, `find`, `clear`) reach the shell untouched.
+
 ## 0.4.0
 
 ### Output

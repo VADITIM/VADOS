@@ -1,5 +1,6 @@
 <!--
-  The settings overlay: Esc, or the gear.
+  The settings overlay: Shift+Esc, or the gear. Bare Esc closes it, like any
+  other surface that has taken the keyboard.
 
   It owns its own entrance and exit, its own markup and its own CSS, and it
   reads every control off the tables in `$lib/settings.ts` — so adding a mode

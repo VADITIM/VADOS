@@ -261,6 +261,54 @@ Still open — it is [tasks.md](../tasks.md)'s first blocker, and it is architec
 
 ---
 
+## 21. The blinking caret is not evidence that the keyboard is pointed here
+
+**Symptom.** After clicking around — the cwd panel, a block, empty space — typing did nothing. The input bar's caret was still blinking, clicking the bar again did not help, and Tab did not help either. The only way back was unknown; it read as the input bar "breaking".
+
+**Cause.** Two carets, and only one of them means anything. The bar's caret is drawn by *us* from the shell's screen, so it blinks whenever the shell has a prompt up — which is always. The keyboard, meanwhile, belongs to whatever the webview last gave focus to, and everything in this app is clickable: a panel button keeps the caret after doing its work, a focusable link in output keeps it, and clicking dead space drops focus to `<body>`. xterm's textarea is the only element that turns keystrokes into bytes, and nothing was putting focus back on it. The click handler that was supposed to (`refocus`) bails whenever a document selection exists, which after a stray drag is permanent.
+
+**Rule.** **A mirrored indicator is not a state readout.** Anything drawn from a remote source — the shell's screen here — says what that source is doing, never what the local app is doing. If the app has state a user can be wrong about (which element has the keyboard), it needs its own guarantee, not a coincidence: here, a `focusout` watchdog that takes the keyboard back unless a real text field asked for it, plus a write-through for the one keystroke that was pressed before the watchdog could act.
+
+**Family.** §19's out-of-band markers, from the other end: there the data arrived stripped of its meaning, here an indicator was read as meaning something it never carried.
+
+---
+
+## 22. One erased line read as a redrawn screen
+
+**Symptom.** `npm ls --all` landed with no character wave at all — the whole dependency tree simply appeared. Ordinary list output (`ls`, `ping`) waved normally, and the same `npm ls` block was also the one that sometimes kept a lone `\` instead of its output.
+
+**Cause.** A block that gets *shorter* is taken as a program redrawing its own screen, and such a block is flagged `data-repaint` for good: every element in it becomes unsafe to character-split, because a redraw rewrites all of them mid-flight. npm draws a progress spinner on the row under the command, then erases it before printing the tree. That erase costs the block exactly one row — enough to trip a flag meant for `less` paging its whole screen, a full second before the output that would have waved even existed.
+
+**Rule.** **A heuristic that latches must be sized to what it is detecting.** The evidence here is not "shorter" but "shorter by a screenful"; a program rewriting the line it stands on is the most common thing in a terminal and must not read as one rewriting the buffer. Where a latch cannot be sized honestly, it should decay instead of being set once and left.
+
+**Family.** §20 — the same command's rows, the same missing wave, a different mechanism. Both were found by asking what that specific command's bytes do to the buffer rather than by reasoning about the animation.
+
+---
+
+## 23. Corrupt characters that were corrupt before we saw them
+
+**Symptom.** `Get-Content CLAUDE.md` rendered `â€"` where the file has `—`. A terminal showing mojibake is the classic sign of a decoder reading UTF-8 as some 8-bit codepage, and the block renderer, the parser and the snapshot path were all suspects.
+
+**Cause.** None of them. Windows PowerShell 5.1's `Get-Content` reads a file with no BOM as the ANSI codepage, so it decoded the file wrong, re-encoded the mistake as UTF-8, and wrote *that* down the pipe. The bytes reaching the terminal were valid UTF-8 spelling the wrong characters, and every decoder along the way did its job. `Get-Content -Encoding UTF8` on the same file is clean, and so is `pwsh`.
+
+**Rule.** **When text arrives wrong, first find out whether it arrived wrong.** Encoding faults are indistinguishable from rendering faults on screen, so the question is settled at the boundary, not in the renderer: check the same command in another terminal, or read the raw bytes back. A terminal that "fixed" this by injecting encoding defaults into the shell would be answering for the shell's semantics, which is exactly what [decisions.md](../decisions.md) rules out — and would corrupt genuinely ANSI files in the other direction.
+
+**Family.** §19 and §21 — three shapes of the same mistake: the boundary is where the meaning changed, and the local code is only where it became visible.
+
+---
+
+## 24. A key delivered to the wrong element is gone, and refocusing does not bring it back
+
+**Symptom.** Ctrl+C and `q` had to be pressed several times to stop a running program. Not always — "randomly", which is the shape of a fault that depends on where the pointer had been.
+
+**Cause.** Focus. The keyboard belongs to whatever the webview last gave it to, and a webview gives it away for a click on anything focusable and takes it away silently when a focused node is re-rendered out of the document. The recovery for that already existed — put focus back and write the key through by hand, because the event has already been dispatched and will not be dispatched again — but it was fenced by two conditions that excluded exactly the keys people press to escape: it sat behind an early return for raw mode, so `htop` and `vim` had no recovery at all, and behind `atPrompt`, so every key pressed while a command was *running* was dropped. Ctrl+C was excluded a third time, as a modifier chord.
+
+**Rule.** **Recovery has to cover the keys that matter most, and those are never the ordinary ones.** A dropped letter is retyped without thinking; a dropped interrupt reads as a terminal that has hung. When a mechanism exists to make a lost key good, its conditions are the whole feature — enumerate them against the keys someone reaches for when something has gone wrong, not against the keys they use when it is going well.
+
+**Family.** §21, directly: same subsystem, and the same mistake of trusting a state (`atPrompt`, "raw mode owns the keyboard") to stand in for a question it does not answer. Raw mode owning the *keyboard* never meant it owned *focus*.
+
+---
+
 ## Housekeeping
 
 Add an entry when a bug's *cause* was surprising, not when its fix was long. If the next occurrence would be recognised from the symptom alone, it does not need to be here.

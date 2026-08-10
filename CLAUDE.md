@@ -1,6 +1,8 @@
 # VAD/OS
 
-Cross-platform terminal (Windows + Arch) that renders command output as structured markdown blocks. Tauri v2 + SvelteKit (SPA) + portable-pty + xterm.js (raw fallback only) + GSAP.
+Cross-platform terminal (Windows + Arch) that treats a session as a structured interaction rather than a stream of text: commands become blocks, output keeps the structure it already had, and anything the terminal does not understand is passed through untouched. Tauri v2 + SvelteKit (SPA) + portable-pty + xterm.js (raw fallback only) + GSAP.
+
+Markdown is one of the representations that output can take. It is not what the product is, and building as though it were produces a terminal that can only render output someone wrote in markdown — which is almost none of it.
 
 ## Read first
 
@@ -13,7 +15,9 @@ Cross-platform terminal (Windows + Arch) that renders command output as structur
 
 **Before writing or changing any animation code, read [.claude/docs/ANIMATION.md](.claude/docs/ANIMATION.md).** It is binding, not advisory — it covers the reveal (label bars and the character wave), stagger timing, what live output may not do, flood control, and cleanup requirements.
 
-**Before touching the output path (PTY read → IPC → parse → DOM), read [.claude/docs/PERFORMANCE.md](.claude/docs/PERFORMANCE.md).** Also binding — latency/memory/throughput budgets, IPC coalescing, scrollback virtualization, and the measurement protocol. The bar: never noticeably heavier than a standard terminal.
+**Before touching the output path (PTY read → IPC → parse → DOM), read [.claude/docs/PERFORMANCE.md](.claude/docs/PERFORMANCE.md).** Also binding — latency/memory/throughput budgets, IPC coalescing, scrollback virtualization, and the measurement protocol. The bar: never noticeably heavier than a standard terminal. Its budgets are targets; [BENCHMARKS.md](BENCHMARKS.md) holds what has actually been measured, and no optimisation lands without a before and after number in it.
+
+**Before changing anything that communicates state, read [.claude/docs/ACCESSIBILITY.md](.claude/docs/ACCESSIBILITY.md).** Binding, and short. The rule it is made of: a semantic layer may add a channel, never replace one — so never colour alone, and nothing exists only as a difference in when it animated.
 
 ## Use the installed plugins
 
@@ -41,7 +45,7 @@ The plugins installed for this repo are not optional decoration. Use them by def
 - `src/lib/anim.ts` — the animation values more than one surface uses. A shared value is a statement that two surfaces are the same gesture; anything used once stays where it is used.
 - `src/lib/components/Settings.svelte` — the Esc overlay. Owns its markup, its CSS and both halves of its animation; the page owns the values and does the applying.
 - `src/lib/reveal-plan.js` — which reveal a run of parsed text gets, and in what order. Self-check: `node src/lib/reveal-plan.check.mjs`.
-- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), the ghost completion's sources, shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
+- `src/lib/input.js` — the docked input bar's non-DOM half: suggestion-strip items (drop and Tab), the ghost completion's sources, the plain word for a command whose name is an abbreviation (`COMMAND_WORDS`), the shortened cwd, shell quoting, path joining, and the selected runs of the mirrored line. Self-check: `node src/lib/input.check.mjs`.
 - `src-tauri/src/dir.rs` — directory listing for the Tab suggestions, and `open <path>`. Dumb like `pty.rs`: names and is-it-a-directory, nothing more.
 - `src/routes/+page.svelte` — terminal view.
 
@@ -63,8 +67,10 @@ Every command VAD/OS answers itself and every key it takes from the shell goes i
 Break either of these and the design is wrong, however good it looks:
 
 1. **The parser emits nodes, never a markup string.** Nodes render through Svelte, which escapes text, so command output can never be read as markup. One AST feeds the screen, the clipboard, and export.
-2. **Every block keeps the raw bytes it rendered from** and can be toggled back to them. This is what makes rendering safe to be wrong about.
+2. **Every block keeps the raw bytes it rendered from** and can be toggled back to them. This is what makes rendering safe to be wrong about. **Currently false in code** — `snapshot()` keeps decoded text with no bytes and no cell attributes, which is why the raw toggle does not exist and why block mode drops ANSI colour. [.claude/foundation/phase-h1-raw-fidelity.md](.claude/foundation/phase-h1-raw-fidelity.md) makes it true, and nothing in the Expansion group starts before it. Do not read this rule as a guarantee about the code until then.
 
-The order that decides every rendering feature: **compatibility first, beauty second.** Plain and ANSI output renders exactly as it is. Markdown is entered on evidence — a program declaring it, or a detector clearing a high bar — never assumed.
+The order that decides every rendering feature: **compatibility first, beauty second.** Plain and ANSI output renders exactly as it is. Structure is entered on evidence — a program declaring it, an adapter that knows the command, or a detector clearing a high bar — never assumed. A missed structure shows plain text; a false positive changes what the program printed, and only the second is a bug.
+
+And where VAD/OS does not understand something, it behaves like a conventional terminal rather than trying to interpret it. The fallback direction is fixed so that a new heuristic has to argue against it, instead of only being measured on how often it is right.
 
 And VAD/OS is the **terminal**, not the shell. PowerShell is the Windows default because it ships with Windows; nothing above the PTY may depend on it.

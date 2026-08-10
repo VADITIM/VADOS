@@ -108,7 +108,7 @@ This is the whole rule behind the settings panel: the panel is focal and gets th
 | Character wave — one character | 0.3s | `power2.out` |
 | Character wave — stagger | 0.012s per unit, 0.6s total cap | — |
 | Block entrance | 0.25s | `power2.out` |
-| Result heading pulse | 0.3s | `power2.out` |
+| Result line | — | the label reveal, tier 0 |
 | Divider draw | 0.25s | `power2.inOut` |
 | Border hover | 0.25s | `power2.out` |
 | **Copy — lean toward the cursor** | 0.12s | `power2.in` |
@@ -389,7 +389,7 @@ Durations are the chrome pair: 0.34s `power3.out` opening, 0.2s `power2.in` clos
 
 Animating `height` is banned everywhere in this file. There is exactly one exception, and it comes with the loop guard that makes it survivable, taken from `Module.vue`'s `ResizeObserver` block.
 
-**Where:** a block whose content genuinely re-flows to a new natural height — a fold or unfold ([../foundation/phase-8-markdown-engine.md](../foundation/phase-8-markdown-engine.md)), a rendered block whose embed finished loading, or **a block's first content landing**, which is the same event: the box holds a head and a loading bar while the command works, then a screenful arrives in one frame. Snapping is worse than the cost here, because the snap moves everything below it under the reader.
+**Where:** a block whose content genuinely re-flows to a new natural height — a fold or unfold ([../foundation/phase-8-document-engine.md](../foundation/phase-8-document-engine.md)), a rendered block whose embed finished loading, or **a block's first content landing**, which is the same event: the box holds a head and a loading bar while the command works, then a screenful arrives in one frame. Snapping is worse than the cost here, because the snap moves everything below it under the reader.
 
 The first-landing case animates **once**. After it, the command is streaming, and a tween per chunk fights both the next chunk and the scroll sync — so the observer disconnects the moment it has animated, which satisfies the unobserve-before-tween guard by never observing again.
 
@@ -413,7 +413,7 @@ What is live about live output is **when** an element animates, not how. An elem
 
 An element reveals as its content lands — but "lands" means the program finished a thought, not that a chunk boundary happened to fall somewhere. The renderer takes the buffer's structure only after the stream has been quiet for 80ms, capped at 240ms so a command that never stops talking still flows. Below that cap nothing is being delayed; it is being allowed to arrive.
 
-A block's **first** paint is held longer — 900ms — because there is nothing on screen yet to hold back, and half a block arriving before the rest is the thing that reads as broken. What covers that wait is the **run bar**: a command that has produced nothing yet shows an indeterminate bar beside the running hint, ambient tier, after a third of a second so fast commands never flash one. It appears only while *nothing* is shown — output is its own proof of life, and a bar beside it would be saying it twice. It loops forever by construction, so its kill path is not optional; the action's `destroy` owns it.
+A block's **first** paint is held longer — 1.5s (`SHOW_FIRST_MAX`) — because there is nothing on screen yet to hold back, and half a block arriving before the rest is the thing that reads as broken. What covers that wait is the **run bar**: an indeterminate bar beside the running hint at the foot of the block, ambient tier, after a third of a second so fast commands never flash one. It runs for as long as the command does. It was once shown only while nothing had been printed, on the argument that output is its own proof of life — it is not: output is evidence that something *happened*, and a command that printed two lines and then stalled looked identical to one that had finished. The bar holds the result line's slot until there is a result to put there. It loops forever by construction, so its kill path is not optional; the action's `destroy` owns it, and the element unmounts the moment the block closes.
 
 This is not a performance measure, it is a correctness one. Structure is re-derived from the whole buffer on every change, and a growing buffer's structure is not final: `ping`'s header is a heading with a single reply under it, and then a heading with a list, so the first replies mounted as prose and were destroyed a moment later. Animating a node on its way to being thrown away is worse than not animating it, and it is the same cause as a block that lands at one height and jumps to another.
 
@@ -423,8 +423,12 @@ The character wave splits real DOM, and Svelte re-renders an output element from
 
 **Two kinds of element are unsafe to split, and it is not "everything in an open block" — treating it as that took the wave off every code block in a running command.**
 
-1. **The last element of an open block**, because output is appended to it. Everything above it has been passed by the parser and is only rewritten if its text changes, which for append-only output it does not.
-2. **Every element of a block that has been seen to shrink.** A block only gets shorter when a program redraws its own screen, and a redraw rewrites all of it. Once a block has repainted it is assumed to keep repainting, because it will — the block carries a `data-repaint` attribute from the moment the resize observer sees it lose height.
+1. **The last element of an open block, and only while its line is unfinished.** Output is appended to it — that is the hazard, and being last is not. A program that writes a whole row and a newline has nothing more to put in the element that row landed in, and the cursor standing at column 0 is its own statement of that (`tailComplete`, read off the same buffer pass the rendered text came from).
+
+   **Holding every tail is what left a streaming list with no wave anywhere.** Each row is the tail at the instant it arrives, so `ping` revealed row after row as one piece, and the only row that ever waved was the last — released when the block closed. The report reads as "the first three do not animate and the fourth does", which is a strange enough symptom to be worth recognising: it means a per-element safety rule is firing on everything except the final element.
+2. **Every element of a block that has been seen to lose more than two rows at once.** A block that gets shorter by a screenful is a program redrawing its own screen, and a redraw rewrites all of it. Once a block has repainted it is assumed to keep repainting, because it will — it carries a `data-repaint` attribute from the moment the resize observer sees that drop.
+
+   **A line is not a screen, and the threshold is what says so.** Every progress spinner erases the line it stands on; `npm ls` does it once, right before printing its tree. Flagging that took the character wave off the whole command for the rest of its life, an entire second before the output that would have waved existed. The tail element is held back on its own account anyway, and that is where a rewrite in place actually lands.
 
 Everything else splits and waves normally, including code blocks, whose wave drops to a per-word unit at `WAVE_MAX` and is the same gesture at a coarser grain.
 
@@ -481,9 +485,11 @@ So the bars live in one static overlay, built once, positioned over the target i
 
 **The parse is the identification.** The parser has already decided what every run of text *is* — a status heading, a filled inline-code token, a path, a flag, a placeholder, a link — and the renderer wrote that decision onto the element as a class. The animation reads it back and spends it. It knows nothing about markdown, and it never re-derives what the parser already knows.
 
-The ranking lives in [../../src/lib/reveal-plan.js](../../src/lib/reveal-plan.js) (`labelTier`, `labelGroups`), pure and checked without a browser: `node src/lib/reveal-plan.check.mjs`.
+The ranking lives in [../../src/lib/reveal-plan.js](../../src/lib/reveal-plan.js) (`labelTier`, `labelGroups`, `waveRank`), pure and checked without a browser: `node src/lib/reveal-plan.check.mjs`.
 
 **Colour decides.** A colour is the parser saying *this run means something specific*, so anything tinted is a label and anything grey is prose for the wave. Tier order is **most saturated first**, because the order the eye receives them in should be the order of how much they matter:
+
+To say that precisely, because it is the thing most likely to be misread as shallow: **these are semantic ranks that colour happens to encode, not colours.** `labelTier` reads class names, and a class name is the parser's verdict about what a run of text *is* — a status, a path, a flag. The colour and the tier are two expressions of one decision that was made upstream of both. Ranking by hue directly would be the shallow version, and it would break the first time a token was tinted for any reason other than meaning.
 
 | Tier | What | Colour |
 |---|---|---|
@@ -492,6 +498,10 @@ The ranking lives in [../../src/lib/reveal-plan.js](../../src/lib/reveal-plan.js
 | 2 | Paths | the complement |
 | 3 | Flags, links, timestamps | `--accent-text` |
 | 4 | Placeholders | `--accent-text-soft` |
+
+**A bar takes the colour of the status it is uncovering.** `--err` under a `.warn` or `.err` ancestor, `--ok` under an `.ok` one, the accent everywhere else. A green `done` swept by a purple bar says two things at once and only one of them is true. These are the two colours in the app that are not the user's to theme, and that holds for the bar over them as much as for the text.
+
+**A code block's tokens rank with their prose counterparts, not on a scale of their own.** `tok-path` sits with `.inline-code.path`, `tok-link` and `tok-time` with links and timestamps, `tok-flag` and `tok-var` where they always were. A path means the same thing quoted in a sentence and sitting in a stack trace, so it may not arrive on a different beat depending on which it is; the self-check asserts the two are equal rather than trusting the table. Only the paint differs — a token inside a block is tinted and nothing else, since a surface or padding would shift every character after it on that row.
 
 Tiers are `0.2s` apart, every label in a tier sweeps at the same instant. `git diff --no-index [<options>] <path>` therefore lands its flags together, then its placeholders a beat later — the structure of the line made visible, rather than a decoration laid over it.
 
@@ -502,19 +512,36 @@ Two rules hold it together:
 
 Past `LABEL_MAX` labels a tier opens without bars. Fifty flags in a `--help` dump is fifty absolutely positioned divs for half a second, and at that density they read as one texture anyway.
 
+### Movement is reserved for information that benefits from attention guidance
+
+The tiers rank meaning, and the reveal spends motion in that order. That is only worth anything while motion is scarce. **If everything meaningful animates, nothing is meaningful** — five bars firing across a build summary is not five pieces of guidance, it is a light show with a ranking nobody can perceive.
+
+`LABEL_MAX` is a **per-tier** ceiling and does not stop five tiers each firing their own full complement. So there is a second cap, on the block:
+
+- Past the block's cap, **the lowest tiers fall through to the wave** rather than the highest ones being dropped. Losing the bar on a placeholder costs nothing; losing it on the result line costs the one thing the reveal was for.
+- The result line is tier 0 and it is the last thing to lose its bar. A block that gets exactly one bar gets it there.
+
+The instinct this is written against is the reasonable-sounding one: a token was ranked, so it earned a bar. It did not. **The ranking says which motion to spend first, not that all of it must be spent.** A five-line build summary gets one bar, on the result, and the rest rises in the wave — and that reads as *look here*, which is the whole brief, rather than *look at everything*, which is the failure mode this file exists to prevent.
+
+Same rule, one level up, as **one focal element per action**. It is the same claim about meaning applied inside a block instead of across the screen.
+
 ### The character wave
 
-**The wave runs last, after every label tier.** It starts at `tiers.length * LABEL_STEP` — one beat past the last tier's start, which falls inside that tier's own retreat, so the prose begins as the last bar is clearing its text rather than after a gap. The tiers are a ranking of how much a run of text means and grey prose is the bottom of it: it is the material the tokens sit in, so it arrives after them. An element with no labels has no beats to wait through and waves at zero.
+**The wave runs last, after every label tier.** It starts at `(tiers.length + waveRank) * LABEL_STEP` — a beat past the last tier's start, which falls inside that tier's own retreat, so the prose begins as the last bar is clearing its text rather than after a gap. The tiers are a ranking of how much a run of text means and grey prose is the bottom of it: it is the material the tokens sit in, so it arrives after them.
+
+**Elements are ranked the same way runs of text inside them are, and the rank offsets the whole reveal.** `revealRank` in `reveal-plan.js` gives a list row 0, ordinary prose 1, and a code block 2; the reveal starts at `rank * LABEL_STEP`, **labels included**, so a block's flags and paths still sweep in tier order inside its late slot rather than being flattened into it. A row is a named thing the way a label is — one item out of a set, and the set is the shape of the output. Prose is the material the rest sits in. A code block is a quotation, a verbatim lump the prose around it is pointing at, so it lands after the text that introduces it and is the last thing in a block to move.
 
 The grey prose between the labels rises into place character by character — `autoAlpha` and a 7px `y`, 0.3s `power2.out`, 0.012s apart. **This is the one sanctioned per-character stagger in the app**, and the reasons the ban exists do not apply to it: it never runs on streaming output, it is one tween with many targets rather than one tween per character, and it only runs on elements that are on screen.
 
 **The unit drops from a character to a word past `WAVE_MAX`, and the wave itself never disappears.** A code block is hundreds of characters, and the first version fell straight from per-character to a single fade at the cut-off — which is why code blocks had no wave at all. The gesture survives the coarser unit; only the resolution changes. Nothing is split at all past `WAVE_MAX_WORDS`, which is an escape hatch and not a size anything real reaches.
 
-**The row is a list's reveal unit, and a row is never split.** The action goes on the `<li>`, not on the `<ul>`. A list grows a row at a time — `ping` adds one a second — and an element animates once, on the chunk it mounted in, so a reveal on the list fired for the first row or two and every row after that appeared with no animation at all. Attaching it per row makes a list follow the same rule as everything else in a block: what arrives is what animates.
+**A line of prose is a reveal unit too, for the same reason a row is.** The action is on a `<span class="md-line">` per line, never on the `<pre>` around them: an element animates once, on the chunk it mounted in, so a paragraph rendered as one element animated when its *first* line landed and every line after that simply appeared. A loop printing a number a second is the case that shows it. The split is `lineParts` in `parse.js`, capped at `LINE_MAX` lines — past that the node is one element again, because a line is a DOM node and a long file is not worth ten thousand of them. The span is `inline-block`: the live line rises with a transform, and a transform does nothing to a non-replaced inline box.
 
-The row then rises as one piece, through the same branch a live element takes. Splitting it instead would run a character stagger *inside* a row while the rows themselves are already arriving one at a time — two waves crossing each other — and at `npm ls` lengths it is hundreds of splits for text that reads as a table. Labels inside a row still sweep; this decides the prose and nothing else. The predicate is `splittable` in `reveal-plan.js`, checked without a browser.
+**The row is a list's reveal unit, and it waves like everything else.** The action goes on the `<li>`, not on the `<ul>`. A list grows a row at a time — `ping` adds one a second — and an element animates once, on the chunk it mounted in, so a reveal on the list fired for the first row or two and every row after that appeared with no animation at all. Attaching it per row makes a list follow the same rule as everything else in a block: what arrives is what animates.
 
-Unlike the two rules below it, the no-split half of this is a style call rather than a safety one. If a future element type wants the same treatment, it goes in `splittable` next to the row, not into the live/repaint tests — those two mean *this cannot be split without breaking*, and conflating them is how the wave came off every code block in a running command once already.
+A row was briefly exempt from the split and rose as one piece, on the argument that a stagger inside a row crosses the wave of rows arriving. It reads as a row that failed to animate, so the exemption is gone: same gesture, same unit, one rank ahead of prose. Labels inside a row still sweep first. Its cost is per-row splitting on a long listing, which `inView` already bounds to the rows on screen, and `WAVE_MAX` / `WAVE_MAX_WORDS` bound per row as they do everywhere else.
+
+The live and repaint tests are the only remaining reasons not to split, and they are safety rules, not style ones — they mean *this cannot be split without breaking*. Nothing else may be added to them for how it looks; conflating the two is how the wave came off every code block in a running command once already.
 
 Per-row actions are cheaper than the whole-list split they replaced, not more expensive: `inView` culls off screen, so a two-thousand-row listing animates the forty rows on screen instead of splitting the entire `<ul>` because one corner of it was visible.
 
@@ -564,7 +591,7 @@ Each command block is a `<section>` with a slightly lighter background than the 
 
 - **Entrance:** `autoAlpha: 0, y: 8` → in, 0.25s. Fires once when the block is created, before the output reveal begins.
 - **Divider:** drawn at the end of each block, separating it from the next. Reveal with `scaleX: 0` → `1`, `transformOrigin: "left center"`. Never animate `width`.
-- **Result heading:** brief pulse on completion, tinted green or red by exit code. Success and failure use the same motion — only the color differs. Do not make failure animate more aggressively; the color already carries it.
+- **Result line:** the label reveal at tier 0, tinted green or red by exit code. It mounts only when the command finishes, so its reveal *is* the completion pulse — it was a separate 0.3s scale tween once, which was a second gesture invented for the one run of text in a block that most obviously already has one. Success and failure use the same motion; the colour carries the difference, and making failure animate harder would be saying it twice. It also says *what* happened where that is known — `exitLabel` in `parse.js` names the codes that recur and prints the rest as hex, because `exit -1978335212` is the same number as `0x8A150014` and only one of those can be recognised.
 - **Border hover:** the pointer-tracked ring, above. Ambient tier — it never responds to an action.
 
 The entrance above is what an **arriving** block gets. A block created by the user submitting a command gets the handoff instead — its border draws and it pops, and that replaces the entrance rather than playing alongside it.
@@ -574,7 +601,7 @@ The entrance above is what an **arriving** block gets. A block created by the us
 The reveal measures rendered rows. Three node types from the expansion phases have none, and each gets an explicit rule rather than an accidental one.
 
 - **Embeds** — mermaid diagrams, images, video ([../foundation/phase-9-rich-media.md](../foundation/phase-9-rich-media.md)). An embed is a leaf: it fades in as one unit, `autoAlpha` only, 0.2s, and it holds its slot in the row stagger so the rows after it stay in sequence. Never scale an embed in — a diagram that grows into place reflows everything under it.
-- **Folds** — collapsing and expanding a section ([../foundation/phase-8-markdown-engine.md](../foundation/phase-8-markdown-engine.md)). This is the one place height genuinely changes, and the rule against animating `height` still holds: animate `scaleY` on a wrapper with `transformOrigin: "top"`, or accept an instant fold. **A fold during an in-flight reveal kills the reveal**, it does not queue behind it.
+- **Folds** — collapsing and expanding a section ([../foundation/phase-8-document-engine.md](../foundation/phase-8-document-engine.md)). This is the one place height genuinely changes, and the rule against animating `height` still holds: animate `scaleY` on a wrapper with `transformOrigin: "top"`, or accept an instant fold. **A fold during an in-flight reveal kills the reveal**, it does not queue behind it.
 - **Split view** — showing or hiding the raw pane ([../foundation/phase-10-document-view.md](../foundation/phase-10-document-view.md)) uses the same 0.2s crossfade as the raw/block mode switch. The xterm side itself is still never animated; only the pane's opacity is.
 
 ## Reduced motion

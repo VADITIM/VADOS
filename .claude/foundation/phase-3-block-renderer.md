@@ -15,7 +15,7 @@
 
 ## Still to do
 
-Phase 3 closes once blocks render reliably. The renderer's future — a real parser, the classifier, streaming, folding — is [phase-8-markdown-engine.md](phase-8-markdown-engine.md), not more scope here. Anything below that is not a bug in the existing structure belongs there.
+Phase 3 closes once blocks render reliably. The renderer's future — a real parser, the classifier, streaming, folding — is [phase-8-document-engine.md](phase-8-document-engine.md), not more scope here. Anything below that is not a bug in the existing structure belongs there.
 
 - More parser rules, or a swap to a real renderer — Phase 8 owns the decision; see [../tasks.md](../tasks.md).
 - Error / note output as fenced code blocks — needs stderr detection, see [../tasks.md](../tasks.md).

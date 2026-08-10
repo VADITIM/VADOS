@@ -45,6 +45,10 @@ export function labelTier(classList) {
   const classes = new Set(classList);
   const has = (/** @type {string} */ c) => classes.has(c);
 
+  // The result line is a status, whichever way it went — `--ok` or `--err`, the
+  // same two fully saturated colours a status heading uses, and the same tier.
+  if (has("block-result")) return 0;
+
   if (has("md-heading")) {
     // A status heading is the one fully saturated colour in the block.
     if (has("warn") || has("ok")) return 0;
@@ -53,6 +57,14 @@ export function labelTier(classList) {
     if (has("md-heading-3")) return null;
     return 1;
   }
+
+  // Code-block tokens carry the same meanings as their inline counterparts and
+  // are ranked with them: a path is a path whether it is quoted in a sentence or
+  // sitting in a fenced block. The classes differ only because a token inside a
+  // block may be tinted and nothing else — no surface, no padding, or the
+  // monospace grid shifts under it.
+  if (has("tok-path")) return 2;
+  if (has("tok-time") || has("tok-link")) return 3;
 
   if (has("inline-code")) {
     // Path and time are the two inline-code variants that repaint themselves;
@@ -75,28 +87,38 @@ export function labelTier(classList) {
   return null;
 }
 
+/** How many ranks `revealRank` can return. */
+export const REVEAL_RANKS = 3;
+
 /**
- * Whether an element's own grey prose may be split into characters.
+ * Which beat an element's *whole* reveal starts on — its labels and its wave
+ * alike, so the tier ranking inside it is preserved and simply offset.
  *
- * A list row may not. **The row is a list's reveal unit** — one action per
- * `<li>`, not one on the `<ul>` — because a list grows a row at a time and an
- * element animates once, on the chunk it mounted in. So the row is what
- * arrives, and the row is what rises: as one piece, the same gesture at the
- * coarsest resolution a live element or an over-long code block already gets
- * (ANIMATION.md, *Live output is not split*).
+ * This ranks elements the way `labelTier` ranks runs of text inside one, and
+ * for the same reason: what a thing is decides when it arrives.
  *
- * Character-splitting it instead would put a stagger inside a row while the
- * rows themselves are already arriving one at a time, which is two waves
- * crossing each other — and at `npm ls` lengths, hundreds of splits for text
- * that reads as a table.
- *
- * Any labels inside a row still sweep. This decides the prose and nothing else.
+ *  - **0, a list row.** One item out of a set, and the set is the shape of the
+ *    output — named the way a label is named. It is a list's reveal unit, one
+ *    action per `<li>` and never one on the `<ul>`, because a list grows a row
+ *    at a time and an element animates once, on the chunk it mounted in.
+ *  - **1, ordinary prose.** The material the rest sits in.
+ *  - **2, a code block.** Last of everything. A block is a quotation — a
+ *    verbatim lump the prose around it is pointing at — so it lands after the
+ *    text that introduces it, and its own flags, paths and placeholders sweep
+ *    in tier order inside that late slot exactly as they would anywhere else.
  *
  * @param {Iterable<string>} classList
- * @returns {boolean}
+ * @returns {number}
  */
-export function splittable(classList) {
-  return !new Set(classList).has("md-row");
+export function revealRank(classList) {
+  const classes = new Set(classList);
+  if (classes.has("code-text")) return 2;
+  // A row and a result line both arrive on the first beat, for opposite
+  // reasons: the row because it is one item of a set, the result because it
+  // mounts only when the command has finished and nothing in the block is still
+  // owed a turn ahead of it.
+  if (classes.has("md-row") || classes.has("block-result")) return 0;
+  return 1;
 }
 
 /**

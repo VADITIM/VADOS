@@ -1,7 +1,7 @@
 // Self-check for reveal-plan.js. Plain node, no test framework:
 //   node src/lib/reveal-plan.check.mjs
 import assert from "node:assert/strict";
-import { labelTier, labelGroups, splittable, LABEL_TIERS } from "./reveal-plan.js";
+import { labelTier, labelGroups, revealRank, LABEL_TIERS, REVEAL_RANKS } from "./reveal-plan.js";
 
 // A status colour is the loudest thing in a block and goes first.
 assert.equal(labelTier(["md-heading", "warn"]), 0);
@@ -57,11 +57,22 @@ assert.deepEqual(
 // Nothing colourful at all means no label beats, so the element is pure wave.
 assert.deepEqual(labelGroups(["tok-str", "block-body"], classesOf), []);
 
-// A list row is never character-split — the row is the list's reveal unit and
-// it rises as one piece. Everything else still splits.
-assert.equal(splittable(["md-row"]), false);
-assert.equal(splittable(["block-body"]), true);
-assert.equal(splittable(["code-text"]), true);
-assert.equal(splittable([]), true);
+// The result line is a status, and status is tier 0 whatever element carries it.
+assert.equal(labelTier(["block-result", "ok"]), 0);
+assert.equal(labelTier(["block-result", "err"]), 0);
+assert.equal(revealRank(["block-result", "err"]), 0);
+
+// Rows first, prose next, code blocks last of everything.
+assert.equal(revealRank(["md-row"]), 0);
+assert.equal(revealRank(["block-body"]), 1);
+assert.equal(revealRank([]), 1);
+assert.equal(revealRank(["code-text"]), 2);
+assert.ok(revealRank(["code-text"]) < REVEAL_RANKS);
+
+// A code block's own tokens rank with their prose counterparts, so the tier
+// order inside a block is the same one it is everywhere else.
+assert.equal(labelTier(["tok-path"]), labelTier(["inline-code", "path"]));
+assert.equal(labelTier(["tok-time"]), labelTier(["inline-code", "time"]));
+assert.equal(labelTier(["tok-link"]), labelTier(["inline-link"]));
 
 console.log("reveal-plan.js self-check passed");

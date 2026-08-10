@@ -1,6 +1,6 @@
 # Phase 9 — Rich Media
 
-**Status: not started.** Blocked on [phase-8-markdown-engine.md](phase-8-markdown-engine.md) — every item here is an AST node type, so there has to be an AST first.
+**Status: not started.** Blocked on [phase-8-document-engine.md](phase-8-document-engine.md) — every item here is an AST node type, so there has to be an AST first.
 
 Mermaid diagrams, images, and video rendered inline in a command block.
 

@@ -1,16 +1,31 @@
-# Phase 8 — Markdown Engine
+# Phase 8 — Document Engine
 
-**Status: not started.** Continues [phase-3-block-renderer.md](phase-3-block-renderer.md), which shipped the hand-rolled parser this phase either extends or replaces.
+**Status: not started.** Continues [phase-3-block-renderer.md](phase-3-block-renderer.md), which shipped the hand-rolled parser this phase either extends or replaces. Depends on [phase-h1-raw-fidelity.md](phase-h1-raw-fidelity.md) — see *Markdown is a representation, not the identity* below.
 
 This is the phase that decides whether the project is a prettier terminal or a different one. Everything after it (rich media, export, split view, themes) consumes what this phase produces.
+
+**Renamed from "Markdown Engine", and the rename is the point.** Markdown is one of the representations a block's output can take. It is not what a block *is*, and building as though it were produces a terminal that can only render output someone wrote in markdown — which is almost none of it. What the block renderer actually produces is a typed document: some of it declared, some detected, most of it plain, some of it ANSI, and all of it addressable.
 
 ## Scope
 
 1. Decide the renderer: keep extending `src/lib/parse.js` or move to a real markdown parser.
-2. Add the classifier — declared / detected / raw — that decides whether a block renders as a document at all.
-3. Render incrementally while a command is still running, without re-parsing the whole buffer per chunk.
-4. Interactive code blocks: copy, and run.
-5. Collapsible sections, with stack traces as the first real case.
+2. Add the classifier that decides how a block renders at all — an ordered hierarchy, not a two-way branch.
+3. Give nodes identity, so a fold, a search hit or a per-node copy has something to anchor to.
+4. Render incrementally while a command is still running, without re-parsing the whole buffer per chunk.
+5. Interactive code blocks: copy, and run.
+6. Collapsible sections, with stack traces as the first real case.
+
+## Markdown is a representation, not the identity
+
+A block carries **how** its structure was arrived at, not just what the structure is. The four node kinds in `src/lib/parse.js` stay as they are; what is added is provenance — declared, detected, plain, ANSI — recorded on the block.
+
+Three things need it:
+
+- **The renderer**, which can afford to be literal about a document a program declared and must stay conservative about one it inferred.
+- **The animation layer**, since [../docs/ANIMATION.md](../docs/ANIMATION.md)'s tiers are the parser's verdict read back, and a verdict reached by heuristic is worth less than one the program stated.
+- **The user**, who eventually needs to be able to see why a block rendered the way it did, when it renders wrong.
+
+This is also the dependency on H1. A block that has thrown its colour away before the classifier runs cannot render "ANSI, as it is" as one of its outcomes — it can only render the monochrome text left over, which makes the raw path a downgrade from a conventional terminal rather than the safe default it is supposed to be.
 
 ## The renderer decision
 
@@ -28,7 +43,21 @@ Requirements on any replacement:
 
 ## The classifier
 
-Three ways a block ends up rendering as a document, in priority order:
+An **ordered hierarchy**, and the order is the whole design. The current implementation is a two-way branch — markdown file through a known reader, or a shape bar — which is the top and bottom of this list with the middle missing.
+
+```
+1. Explicitly declared structured output      the program said so
+2. A known command adapter                    we know what this command emits
+3. Explicit markdown                          a .md file through a known reader
+4. High-confidence shape heuristic            the text clears a high bar alone
+5. Plain text and ANSI                        the default, and the only safe wrong answer
+```
+
+**The asymmetry is a rule, not a preference:** a missed structure shows plain text, and a false positive changes what the program printed. Only the second is a bug. A reader forgives *"why didn't it render this nicely"* indefinitely and forgives *"why did it change what the program printed"* never.
+
+Level 2 is new and is what the earlier three-way version had no room for. `git status` has structure, emits no markdown, and will never clear a shape bar — an adapter that knows what `git status` looks like renders it properly without pretending git emitted a document. Adapters are curated, hand-kept and few, on the same terms as the command name list in `parse.js`: a small list that is right beats a general mechanism that is usually right. **An adapter that is wrong about its command is worse than no adapter**, because it fires with confidence on output level 4 would have left alone.
+
+Levels in detail:
 
 **Declared.** The program says so. Cheapest and most reliable. Two mechanisms:
 - An **OSC sequence** wrapping the output, in the OSC 133 spirit — one private-use marker for "the following is markdown". Programs opt in with an `echo`. Costs nothing when unused, and degrades to invisible in other terminals.
@@ -36,9 +65,17 @@ Three ways a block ends up rendering as a document, in priority order:
 
 **Detected.** The output looks like a document with high confidence. The bar is deliberately high — a false positive silently corrupts what the user asked to see, and a false negative costs nothing but plainness. Signals worth trusting: a fenced code block with a language tag, an ATX heading run, a pipe table with an alignment row. Signals not worth trusting alone: a single `*`, a leading `-`, a line ending in `:`.
 
-**Raw.** Default. Everything else.
+**Plain and ANSI.** Default. Everything else, rendered exactly as it is — which after [phase-h1-raw-fidelity.md](phase-h1-raw-fidelity.md) means with the program's own colour intact, not as monochrome text.
 
 The classifier is one function with one test file. Every misfire reported becomes a case in it.
+
+## Nodes gain identity
+
+A node today is a plain object with no id, no offset and no source range, and the array is flat. Nothing can point at one.
+
+Three things in this phase and the next need to: folding has to name the heading it collapsed, [phase-14-finding-things.md](phase-14-finding-things.md)'s search has to name the node a hit landed in, and per-node copy has to name what it copied. Adding identity once here is cheaper than retrofitting it three times, and it is the kind of change that is nearly free before there are consumers and expensive after.
+
+What is needed is an id stable across a re-parse of a growing buffer — a node that keeps its identity when the chunk after it arrives. An id derived from position in the array is not that, because a streaming buffer inserts nodes in the middle.
 
 ## Streaming
 
@@ -88,7 +125,7 @@ Folding is the first thing that makes long output better rather than prettier.
 
 ## Gotchas to watch
 
-- **ANSI and markdown collide.** Output can be both coloured and structured. The AST needs to carry inline colour spans, or colour is dropped on the markdown path — and dropping it silently is a regression from a plain terminal.
+- **ANSI and markdown collide.** Output can be both coloured and structured. The AST needs to carry inline colour spans, or colour is dropped on the markdown path — and dropping it silently is a regression from a plain terminal. [phase-h1-raw-fidelity.md](phase-h1-raw-fidelity.md) is that work, and it lands first for this reason. What remains here is the collision itself: where a program coloured a run *and* the parser has an opinion about the same run, the program wins and the parser fills in.
 - **The shape parser's false positives are the whole risk.** Every rule that fires on plain output is a bug report waiting to happen. Prefer a rule that misses to a rule that overreaches.
 - **Do not let the classifier depend on the shell.** A PowerShell error record and a bash stderr line are both "an error"; the classifier must not grow a per-shell branch. If it needs one, the detector is matching the wrong thing.
 - **Fold state and virtualization interact.** When scrollback virtualization lands, a folded block that scrolls out and back must come back folded.

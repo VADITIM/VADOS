@@ -1,7 +1,16 @@
 // Self-check for parse.js. Plain node, no test framework:
 //   node src/lib/parse.check.mjs
 import assert from "node:assert/strict";
-import { parse, isMarkdown, parseMarkdown, runHint, toMarkdown, codeSpans } from "./parse.js";
+import {
+  parse,
+  isMarkdown,
+  parseMarkdown,
+  runHint,
+  exitLabel,
+  lineParts,
+  toMarkdown,
+  codeSpans,
+} from "./parse.js";
 
 // Code nodes carry their token spans. The assertions below are about block
 // *structure*, so they build the spans rather than restate them; the spans
@@ -330,6 +339,41 @@ assert.deepEqual(parse("Continue? [Y/n]:"), [
   },
 ]);
 
+// ── a column table is one node ──────────────────────────────────────────────
+
+// `Get-ChildItem`, and the reason this rule exists: `-a----` is a dash followed
+// by a letter, which is a diff's deleted line, so the file rows fenced
+// themselves while the `d-----` rows above them stayed prose. One table, two
+// renderings, in the command people run most.
+const listing = parse(
+  [
+    "Mode                 LastWriteTime         Length Name",
+    "----                 -------------         ------ ----",
+    "d-----        09.08.2026     19:50                .claude",
+    "-a----        06.08.2026     17:06            414 .gitignore",
+  ].join("\n"),
+);
+assert.equal(listing.length, 1);
+assert.equal(listing[0].kind, "code");
+// The header comes back out of the paragraph it had already joined.
+assert.ok(listing[0].text.startsWith("Mode "));
+assert.ok(listing[0].text.endsWith(".gitignore"));
+
+// A blank line ends the table, and what follows is read normally again.
+const after = parse(["a   b", "--- ---", "1   2", "", "Total: 2 files"].join("\n"));
+assert.equal(after.length, 2);
+assert.equal(after[0].kind, "code");
+assert.equal(after[0].text, "a   b\n--- ---\n1   2");
+assert.deepEqual(after[1], { kind: "text", parts: [{ code: false, text: "Total: 2 files" }] });
+
+// One dash run is a divider, not a rule line — nothing above it is swallowed.
+assert.deepEqual(
+  parse(["some prose", "--------", "more prose"].join("\n")).map((n) => n.kind),
+  ["text"],
+);
+// A diff's own `--- a/file` header has text on the line and stays a diff.
+assert.equal(parse(["--- a/x.js", "+++ b/x.js", "@@ -1 +1 @@"].join("\n"))[0].kind, "code");
+
 // ── code block token spans ──────────────────────────────────────────────────
 
 // The `git diff --help` line the feature was asked for: the flag, the two
@@ -364,6 +408,34 @@ assert.deepEqual(codeSpans("synonym for '-p --raw'"), [
 // removed lines are not littered with false flags. `--git` is a real one.
 assert.deepEqual(codeSpans("@@ -1,2 +1,2 @@"), [{ token: null, text: "@@ -1,2 +1,2 @@" }]);
 assert.deepEqual(codeSpans("-let x = 1;"), [{ token: null, text: "-let x = 1;" }]);
+
+// Links, timestamps and paths inside a block, from the same shapes prose uses.
+// A stack trace and a log line are where most of them actually occur.
+assert.deepEqual(codeSpans("  at ./src/lib/parse.js line 12"), [
+  { token: null, text: "  at " },
+  { token: "path", text: "./src/lib/parse.js" },
+  { token: null, text: " line 12" },
+]);
+// Same rule as in prose: a slash after a word character is not a path opening,
+// which is what keeps `a/x.js` in a diff header and `and/or` out of it.
+assert.deepEqual(codeSpans("src/lib/parse.js"), [{ token: null, text: "src/lib/parse.js" }]);
+assert.deepEqual(codeSpans("12:30:01 ready"), [
+  { token: "time", text: "12:30:01" },
+  { token: null, text: " ready" },
+]);
+// A URL is matched whole: its `//` must not be cut out as a path, nor its port
+// as a time.
+assert.deepEqual(codeSpans("Local: http://localhost:5173/app"), [
+  { token: null, text: "Local: " },
+  { token: "link", text: "http://localhost:5173/app" },
+]);
+// A diff's `a/`-prefixed names are not paths — the slash follows a word
+// character — so a diff header stays one untinted run apart from its flag.
+assert.deepEqual(codeSpans("diff --git a/x.js b/x.js"), [
+  { token: null, text: "diff " },
+  { token: "flag", text: "--git" },
+  { token: null, text: " a/x.js b/x.js" },
+]);
 
 // The invariant that keeps a block's raw bytes recoverable: concatenating
 // every span reproduces the input exactly, tinted or not.
@@ -435,15 +507,80 @@ assert.equal(parse(hunk)[0].kind, "code");
 // fixture at the top of this file is the real guard against.
 assert.equal(parse("one -x\n\ntwo -y").filter((n) => n.kind === "code").length, 0);
 
-// The running hint is read off the output, never off the command name: `git
-// diff` pages only when its output does not fit, and anything can be piped into
-// a pager. A pager that is waiting has drawn the prompt it waits with.
+// The running hint reads the pager's own prompt first — that is evidence, and
+// it works for a pager this could never have a list for.
 assert.match(runHint("some diff\n:"), /^q quits/);
 assert.match(runHint("some diff\n(END)"), /^q quits/);
 assert.match(runHint("--More--"), /^q quits/);
 assert.match(runHint("compiling\n  building [===>   ]"), /ctrl\+c/);
 // A colon that is part of a line is not a pager prompt.
 assert.match(runHint("note: something happened"), /ctrl\+c/);
+// The prompt wins over the command: it is a reading, not a guess.
+assert.match(runHint("some diff\n:", "git diff"), /space pages/);
+// A command known to page says so even when nothing recognisable was drawn —
+// the reported case, where `ctrl+c stops` was the one thing that would not work.
+assert.match(runHint("diff --git a/x b/x", "git diff"), /^q quits the pager/);
+assert.match(runHint("x", "git log --oneline"), /^q quits the pager/);
+assert.match(runHint("x", "man ls"), /^q quits the pager/);
+assert.match(runHint("x", "cat big.txt | less"), /^q quits the pager/);
+// Told not to page, so it does not.
+assert.match(runHint("diff --git a/x b/x", "git --no-pager diff"), /^running/);
+assert.match(runHint("x", "git -P log"), /^running/);
+// Not every git command pages, and nothing else here is a pager.
+assert.match(runHint("x", "git status"), /^running/);
+assert.match(runHint("x", "npm ls"), /^running/);
+// `--less` is a flag, not the pager, and `blameless` is not `blame`.
+assert.match(runHint("x", "cargo build --lessons"), /^running/);
+assert.match(runHint("x", "git commit -m blameless"), /^running/);
+// The subcommand is read in its own position, so a paged word inside a message
+// or a filename is not one. `git -c core.pager=x log` still is.
+assert.match(runHint("x", 'git commit -m "log the thing"'), /^running/);
+assert.match(runHint("x", "git -c color.ui=always log"), /^q quits the pager/);
+
+// A text node is rendered one element per line, because a line is what arrives
+// and an element animates once, on the chunk it mounted in.
+assert.deepEqual(
+  lineParts([{ code: false, text: "one\ntwo" }]),
+  [[{ code: false, text: "one" }], [{ code: false, text: "two" }]],
+);
+// A part that ends at a line break does not drag an empty part onto the next
+// line, and the break itself carries no part at all.
+assert.deepEqual(
+  lineParts([{ code: false, text: "a\n" }, { code: true, text: "--flag" }]),
+  [[{ code: false, text: "a" }], [{ code: true, text: "--flag" }]],
+);
+// A blank line is an empty group — the newline between groups is the caller's.
+assert.deepEqual(lineParts([{ code: false, text: "a\n\nb" }]), [
+  [{ code: false, text: "a" }],
+  [],
+  [{ code: false, text: "b" }],
+]);
+// Every part's own flags survive the split; only its text is cut.
+assert.deepEqual(lineParts([{ code: true, text: "x\ny", kind: "path" }]), [
+  [{ code: true, text: "x", kind: "path" }],
+  [{ code: true, text: "y", kind: "path" }],
+]);
+// Past the cap the node comes back whole — one element, as before, because a
+// line is a DOM element and a long file is not worth ten thousand of them.
+const many = [{ code: false, text: Array.from({ length: 40 }, (_, i) => `${i}`).join("\n") }];
+assert.deepEqual(lineParts(many, 10), [many]);
+assert.equal(lineParts(many, 100).length, 40);
+
+// An exit code says what happened where that is known, and is at least
+// *readable* where it is not.
+assert.equal(exitLabel(0), "done");
+assert.equal(exitLabel(1), "exit 1 · failed");
+assert.equal(exitLabel(127), "exit 127 · command not found");
+assert.equal(exitLabel(130), "exit 130 · stopped (ctrl+c)");
+// A plain small code stays decimal — that is the form a script tests against.
+assert.equal(exitLabel(42), "exit 42");
+// The case that started this: PowerShell hands back an NTSTATUS as a signed
+// integer, and only the unsigned hex form can be recognised or looked up.
+assert.equal(exitLabel(-1978335212), "exit 0x8a150014");
+assert.equal(exitLabel(-1073741819), "exit 0xc0000005 · crashed (access violation)");
+// The same value arriving unsigned must read identically.
+assert.equal(exitLabel(3221225477), exitLabel(-1073741819));
+assert.equal(exitLabel(-1073741510), "exit 0xc000013a · stopped (ctrl+c)");
 
 // A very long code block is one untinted span. Each tinted token is a DOM
 // element, and a whole-repo diff is tens of thousands of them for colour nobody

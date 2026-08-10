@@ -1,17 +1,24 @@
 # Phase 10 — Document View: Split, Toggle, Export
 
-**Status: not started.** Blocked on [phase-8-markdown-engine.md](phase-8-markdown-engine.md).
+**Status: not started.** Blocked on [phase-8-document-engine.md](phase-8-document-engine.md).
 
 The two features that make the rendered view trustworthy rather than merely nicer: you can always see what was actually printed, and you can always get it out of the app.
 
-## Raw toggle
+## Raw toggle — moved to [phase-h1-raw-fidelity.md](phase-h1-raw-fidelity.md)
 
-The load-bearing one. A rendered block flips to its raw bytes and back with one keystroke.
+The load-bearing one, and it moved because it turned out to be blocked on something nobody had noticed: **a block keeps no raw bytes.** The toggle was never one keybinding away from working; it had nothing to toggle to. Retention, the toggle and the block's three representations are all H1's, and they are ahead of this phase rather than inside it.
 
-- **Per block, not per session.** Global raw mode is the fallback, not the primary control — the useful case is "this one block rendered wrong", not "turn the product off".
-- The toggle is on the block's own chrome and on a keybind for the focused block (Phase 7 owns block focus).
+What stays here, because it is about this phase's features rather than the toggle itself:
+
 - **A block that fails to classify correctly is a bug report.** Wire the toggle to a way of capturing that: at minimum, `copy as raw` gives a reporter the exact input. A one-key "this rendered wrong" that copies input plus classifier verdict is worth more than any amount of parser tuning done blind.
-- Cost: the raw snapshot is retained for the block's life. Already settled in [../decisions.md](../decisions.md); it counts against the scrollback budget in [../docs/PERFORMANCE.md](../docs/PERFORMANCE.md).
+
+## Structured block context
+
+A block knows its command, its working directory, its exit code, its duration ([phase-13-command-as-event.md](phase-13-command-as-event.md)) and its output. Export can hand that to a file; it can equally hand it to another program.
+
+This is the same export path pointed somewhere else, and it is worth naming separately because it is the thing that makes the structure useful outside the window it is drawn in. Structure is easier to consume than an ANSI-laden text stream whoever is reading it — which is the same argument that justifies rendering it on screen, and it is not a different argument because the consumer might be a model. **It is not an AI feature and must not be described as one**; see [../decisions.md](../decisions.md), where it sits next to *no built-in AI client* precisely so the two do not get conflated in either direction.
+
+Constraints: it reads the same AST as the screen and the clipboard, it never runs on the UI thread, and it exposes what a block already knows rather than growing a second source of truth about a command.
 
 ## Split view
 
