@@ -6,7 +6,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   // Tauri's own drag-and-drop, never the HTML5 `drop` event. See `watchDrops`.
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { Terminal, type IMarker } from "@xterm/xterm";
+  import { Terminal, type IBufferCell, type IMarker } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
   import gsap from "gsap";
@@ -21,10 +21,14 @@
     SUBCOMMAND_NAMES,
     exitLabel,
     lineParts,
+    locate,
     parse,
     runHint,
     toMarkdown,
   } from "$lib/parse.js";
+  // The program's own colour, mapped onto the parser's text by offset. Pure and
+  // checked without a browser: `node src/lib/ansi.check.mjs`.
+  import { paletteColor, rgbColor, tint, type Run } from "$lib/ansi.js";
   // Which reveal a run of parsed text gets, and in what order — read off the
   // classes the parser's own decisions put on it. Checked without a browser:
   // `node src/lib/reveal-plan.check.mjs`.
@@ -255,11 +259,48 @@
      * ourselves.
      */
     nodes?: Node[];
+    /**
+     * Showing the bytes instead of the rendering. Per block, never per session:
+     * the useful case is "this one block rendered wrong", not "turn the product
+     * off" — global raw mode is already the alt-screen fallback.
+     */
+    raw?: boolean;
+    /**
+     * How far the block's text moved when the echoed command line was dropped
+     * off the front of it. The colour runs (`runsOf`) are in the coordinates
+     * from *before* that slice and are not re-indexed for it — re-walking every
+     * run on every chunk is a pass over the whole array each time, and one
+     * subtraction at the point of use is not.
+     */
+    runShift: number;
   };
 
-  /** Rendering, clipboard, and export all read a block through this one call. */
+  /**
+   * Runs of cells the program gave the same colour and attributes to, per block.
+   *
+   * Outside `blocks` for the same reason `markers` and the raw logs are: a
+   * coloured `--help` dump is thousands of these, they are appended to and
+   * extended in place on every chunk, and each of those writes through Svelte's
+   * proxy would be a reactive notification for something no template reads
+   * directly. The render that shows them is triggered by `buffer` changing in
+   * the same pass, which happens after these are written.
+   */
+  const runsOf = new Map<number, Run[]>();
+  const NO_RUNS: Run[] = [];
+  const blockRuns = (id: number) => runsOf.get(id) ?? NO_RUNS;
+
+  /**
+   * Rendering, clipboard, and export all read a block through this one call.
+   *
+   * Offsets are attached only when there is something that needs them. A block
+   * with no colour in it — most blocks — never pays for the search, and the
+   * nodes come back exactly as the parser made them.
+   */
   function blockNodes(block: Block): Node[] {
-    return block.nodes ?? parse(block.shown ?? block.buffer, block.command);
+    if (block.nodes) return block.nodes;
+    const text = block.shown ?? block.buffer;
+    const nodes = parse(text, block.command);
+    return blockRuns(block.id).length ? locate(nodes, text) : nodes;
   }
 
   let wrapper: HTMLDivElement;
@@ -329,7 +370,7 @@
 
   let mode = $state<"blocks" | "raw">("blocks");
   let blocks = $state<Block[]>([
-    { id: 0, cwd: "", command: "", buffer: banner, closed: true, exitCode: null, md: false },
+    { id: 0, cwd: "", command: "", buffer: banner, closed: true, exitCode: null, md: false, runShift: 0 },
   ]);
   /** Live text of the docked input bar, mirrored from xterm's cursor row. */
   let input = $state("");
@@ -833,7 +874,7 @@
     const id = nextId++;
     const marker = term?.registerMarker(0);
     if (marker) markers.set(id, marker);
-    blocks.push({ id, cwd: lastCwd, command, buffer: "", shown: "", closed: false, exitCode: null, md: true });
+    blocks.push({ id, cwd: lastCwd, command, buffer: "", shown: "", closed: false, exitCode: null, md: true, runShift: 0 });
   }
 
   /**
@@ -943,6 +984,10 @@
     focusedId = null;
     markers.forEach((m) => m.dispose());
     markers.clear();
+    // The blocks these belonged to are about to stop existing, and this is the
+    // largest thing the session holds.
+    dropRawLogs();
+    runsOf.clear();
     blocks.length = 1;
     // The shell never sees this command any more, so nothing else drops the
     // xterm scrollback the blocks were snapshotted from. Leaving it would keep
@@ -989,6 +1034,7 @@
         "Double-click the input bar — the same selection, from the pointer",
         "Ctrl + Up / Down — select a past command block, or click one",
         "Ctrl + Shift + C — copy the selected block, Ctrl + Shift + M as markdown",
+        "Ctrl + Shift + R — show the selected block as the bytes it arrived as, and back. Copying it while it is raw copies the bytes",
         "Ctrl + C — stop the running command",
         "Shift + Esc — open and close settings",
         "Esc — dismiss a suggestion, deselect a block, or close settings. With nothing open it goes to the shell, which clears the line",
@@ -1021,6 +1067,7 @@
       exitCode: 0,
       md: true,
       nodes: HELP_NODES,
+      runShift: 0,
     });
   }
 
@@ -1035,9 +1082,222 @@
     }
   }
 
+  // #region Raw byte log ──────────────────────────────────────────────────────
+  /**
+   * What actually arrived on the wire, per block.
+   *
+   * **This is a record, not a render source, and the distinction is the whole
+   * design.** `buffer` is read back out of xterm's screen *after* every escape
+   * sequence has been applied, and that is the only thing that can be drawn:
+   * replaying these bytes as text reproduces every cursor move, erase-line and
+   * PSReadLine full-line redraw as literal garbage. So the screen stays what
+   * the block renders from, and this is what the block can be *shown as* — the
+   * raw toggle, `copy as raw`, and a faithful export.
+   *
+   * Held outside `blocks` for the same reason `markers` is: bulk binary has no
+   * business inside Svelte's reactive proxy, and nothing here is read during
+   * render.
+   */
+  type RawLog = { chunks: Uint8Array[]; bytes: number; dropped: boolean; text?: string; at?: number };
+  const rawLogs = new Map<number, RawLog>();
+  let rawBytes = 0;
+  /**
+   * Caps, per block and across the session, counted against the RSS budget in
+   * docs/PERFORMANCE.md. A block past its own cap stops logging rather than
+   * keeping a window of the middle — a truncated head with a truncated tail is
+   * a raw view that lies about what it is showing.
+   */
+  const RAW_BLOCK_CAP = 1 << 20;
+  const RAW_TOTAL_CAP = 24 << 20;
+
+  /**
+   * Append a chunk to the open block's log. Called on the PTY's hot path, so it
+   * is a push and a counter and nothing else — no decoding, no scanning, no
+   * concatenation. Everything that costs happens in `rawText`, on a toggle.
+   */
+  function logRaw(bytes: Uint8Array) {
+    const block = currentBlock();
+    // Nothing open, or a full-screen app has the session: there is no block to
+    // show these under either way.
+    if (!block || block.closed || !block.cwd || block.id === rawBlockId) return;
+    let log = rawLogs.get(block.id);
+    if (!log) rawLogs.set(block.id, (log = { chunks: [], bytes: 0, dropped: false }));
+    if (log.dropped) return;
+    if (log.bytes + bytes.length > RAW_BLOCK_CAP) {
+      log.dropped = true;
+      return;
+    }
+    log.chunks.push(bytes);
+    log.bytes += bytes.length;
+    rawBytes += bytes.length;
+    while (rawBytes > RAW_TOTAL_CAP && evictRaw());
+  }
+
+  /**
+   * Drop the oldest surviving log. Oldest first because a raw view is nearly
+   * always wanted for something that just happened, and `Map` iterates in
+   * insertion order, which is block order.
+   *
+   * The entry stays behind as `dropped` rather than being deleted: a block that
+   * cannot show its bytes has to say so, and a missing entry is
+   * indistinguishable from a block that never logged any.
+   */
+  function evictRaw(): boolean {
+    const open = currentBlock()?.id;
+    for (const [id, log] of rawLogs) {
+      if (id === open || log.dropped) continue;
+      rawBytes -= log.bytes;
+      rawLogs.set(id, { chunks: [], bytes: 0, dropped: true });
+      return true;
+    }
+    return false;
+  }
+
+  function dropRawLogs() {
+    rawLogs.clear();
+    rawBytes = 0;
+  }
+
+  /**
+   * One decoder for the session, per docs/PERFORMANCE.md. Only ever used here —
+   * xterm does its own decoding, and Rust never converts to `String` at all so
+   * that a multi-byte character split across two reads survives.
+   */
+  const rawDecoder = new TextDecoder();
+  /** Our own markers, which are traffic VAD/OS injected rather than output. */
+  const OSC_OURS = /\x1b\][07]?133;[^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\]7;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+  const D_MARK = "\x1b]133;D";
+  /**
+   * Control characters, made visible. A raw view whose escape sequences are
+   * still *acting* as escape sequences shows the same thing the rendered view
+   * does, only worse — the point is to see the bytes, so ESC becomes a glyph.
+   * Newlines stay real: a raw view that is one enormous line is unreadable and
+   * nothing is being hidden by keeping it.
+   */
+  const CTRL = /[\x00-\x09\x0b-\x1f\x7f]/g;
+  function visibleCtrl(text: string): string {
+    return text.replace(CTRL, (c) => (c === "\x7f" ? "␡" : String.fromCharCode(0x2400 + c.charCodeAt(0))));
+  }
+
+  /**
+   * The block's bytes, as text, for display and for copy.
+   *
+   * Trimmed at the tail only. The log opens when the user pressed Enter, so it
+   * already starts at the command echo; it closes one chunk late, because the
+   * chunk carrying `133;D` carries the next prompt behind it — that prompt
+   * belongs to no command and is cut here. Our own OSC markers go with it. Note
+   * that PowerShell's integration never sends `133;C`, so an output-start
+   * marker is not something to look for.
+   */
+  function rawText(block: Block): string {
+    const log = rawLogs.get(block.id);
+    // Blocks VAD/OS wrote itself never had bytes — `buffer` *is* their source.
+    if (!log) return block.buffer;
+    if (log.dropped && !log.chunks.length) return "";
+    // The template reads this on every render, and a block re-renders on every
+    // chunk while its command runs. Without the cache a closed block would be
+    // re-decoded for any reason at all.
+    //
+    // ponytail: cached, not incremental. A block left on the raw view *while*
+    // it is still producing output re-decodes from the top per chunk, which is
+    // quadratic — bounded by RAW_BLOCK_CAP, and only reachable by deliberately
+    // toggling a running block. Resume from the last chunk if that stops being
+    // an edge case.
+    if (log.text !== undefined && log.at === log.chunks.length) return log.text;
+    let text = "";
+    for (const chunk of log.chunks) text += rawDecoder.decode(chunk, { stream: true });
+    text += rawDecoder.decode();
+    const end = text.indexOf(D_MARK);
+    if (end >= 0) text = text.slice(0, end);
+    log.text = text.replace(OSC_OURS, "");
+    log.at = log.chunks.length;
+    return log.text;
+  }
+  // #endregion ────────────────────────────────────────────────────────────────
+
   function rowText(y: number): string {
     return term?.buffer.active.getLine(y)?.translateToString(true) ?? "";
   }
+
+  // #region Colour runs ───────────────────────────────────────────────────────
+  /**
+   * A reused cell, for the same reason the read buffer in `pty.rs` is reused:
+   * this is walked per character of every row that arrives.
+   */
+  let cellBuf: IBufferCell | undefined;
+
+  /**
+   * Append the coloured runs of row `y` to `runs`, in the coordinates of a row
+   * whose text starts at `base`.
+   *
+   * Only runs that say something are recorded. Default-attribute text — nearly
+   * all of it — costs one comparison per cell and produces nothing, which is
+   * what keeps `tint` returning a bare text node for almost every line.
+   *
+   * ponytail: cell index is taken as character index. That holds for everything
+   * one cell wide, and drifts by a cell on a row containing a wide glyph — the
+   * *text* is unaffected either way, since it still comes from
+   * `translateToString`, so the cost of being wrong is a colour boundary one
+   * character out on a CJK or emoji row. Walk the cells for the text too if
+   * that ever matters; it means owning the trailing-whitespace trim as well.
+   */
+  function rowRuns(y: number, base: number, len: number, runs: Run[]) {
+    const line = term?.buffer.active.getLine(y);
+    if (!line) return;
+    if (!cellBuf) cellBuf = term?.buffer.active.getNullCell();
+    if (!cellBuf) return;
+    /** The run being accumulated, still open. */
+    let open: Run | undefined;
+    const width = Math.min(line.length, len);
+    for (let x = 0; x < width; x++) {
+      const cell = line.getCell(x, cellBuf);
+      if (!cell) break;
+      // A cell of width 0 is the second half of a wide glyph and carries the
+      // same attributes as the first — extending the open run over it is right,
+      // and starting a new one on it would split every wide character in two.
+      if (cell.getWidth() === 0) continue;
+      const fgSet = !cell.isFgDefault();
+      const bgSet = !cell.isBgDefault();
+      const inverse = !!cell.isInverse();
+      if (!fgSet && !bgSet && !cell.isBold() && !cell.isDim() && !cell.isItalic() && !cell.isUnderline() && !cell.isStrikethrough() && !inverse) {
+        open = undefined;
+        continue;
+      }
+      const fg = fgSet ? (cell.isFgRGB() ? rgbColor(cell.getFgColor()) : paletteColor(cell.getFgColor())) : "";
+      const bg = bgSet ? (cell.isBgRGB() ? rgbColor(cell.getBgColor()) : paletteColor(cell.getBgColor())) : "";
+      const next: Run = {
+        at: base + x,
+        end: base + x + 1,
+        // Reverse video is resolved here rather than at paint time. The block
+        // renderer has no terminal background to fall back on the way the raw
+        // view does, so "swap them" has to become two concrete values while the
+        // cell is still in hand.
+        fg: inverse ? bg || token("--surface-base") : fg,
+        bg: inverse ? fg || token("--text") : bg,
+        bold: !!cell.isBold(),
+        dim: !!cell.isDim(),
+        italic: !!cell.isItalic(),
+        underline: !!cell.isUnderline(),
+        strike: !!cell.isStrikethrough(),
+      };
+      if (
+        open &&
+        open.end === next.at &&
+        open.fg === next.fg &&
+        open.bg === next.bg &&
+        open.bold === next.bold &&
+        open.dim === next.dim &&
+        open.italic === next.italic &&
+        open.underline === next.underline &&
+        open.strike === next.strike
+      ) {
+        open.end = next.end;
+        continue;
+      }
+      runs.push((open = next));
+    }
+  }
+  // #endregion ────────────────────────────────────────────────────────────────
 
   /**
    * Whether `row` and the row after it are two halves of one split word.
@@ -1089,7 +1349,10 @@
    * is the only case this fast path is taken: a repaint (the buffer got shorter)
    * and a reflow (a resize) both throw the cache away and re-read in full.
    */
-  const snapRead = new Map<number, { fromY: number; y: number; text: string; glued: boolean; end: number }>();
+  const snapRead = new Map<
+    number,
+    { fromY: number; y: number; text: string; glued: boolean; end: number; runs: number }
+  >();
   /** Rows re-read on every pass regardless. See below. */
   const SNAP_SLACK = 2;
   /**
@@ -1131,17 +1394,27 @@
     let y = from?.y ?? marker.line;
     let out = from?.text ?? "";
     let glued = from?.glued ?? false;
+    // The runs live on the block and are truncated back on resume, rather than
+    // being copied into the cache: the cache is rewritten on every pass, and
+    // copying a `--help` dump's worth of runs each time is the quadratic read
+    // this cache exists to avoid, in a new place.
+    let runs = runsOf.get(block.id);
+    if (!runs) runsOf.set(block.id, (runs = []));
+    runs.length = from?.runs ?? 0;
     // Everything except the last couple of rows is committed. The join between
     // two rows is decided by looking at the row *after* them, and the row after
     // the last one is still being written — so the tail is re-read every pass
     // and only what sits behind it is kept.
     const commitY = Math.max(marker.line, end - SNAP_SLACK);
-    let keep = { fromY: marker.line, y, text: out, glued, end };
+    let keep = { fromY: marker.line, y, text: out, glued, end, runs: runs.length };
 
     for (; y <= end; y++) {
-      if (y === commitY) keep = { fromY: marker.line, y, text: out, glued, end };
+      if (y === commitY) keep = { fromY: marker.line, y, text: out, glued, end, runs: runs.length };
       if (!buf.getLine(y)) continue;
       const row = rowText(y);
+      // Measured against the row's own text, so a run can never claim more
+      // columns than the text it is colouring has characters.
+      rowRuns(y, out.length, row.length, runs);
       out += row;
       // A wrapped row continues the same logical line — no newline, otherwise
       // long output gains a break at every terminal width.
@@ -1152,7 +1425,16 @@
     snapRead.set(block.id, keep);
     // The block starts on the prompt row, so its first logical line is the
     // echoed command — already captured in `block.command`, drop it here.
-    block.buffer = out.split("\n").slice(block.command ? 1 : 0).join("\n").replace(/\s+$/, "");
+    //
+    // The runs stay in `out`'s coordinates and this is what tells `tint` how
+    // far they moved. Re-indexing them here would be a walk over every run on
+    // every chunk.
+    // No newline yet means the echoed command is all there is, and the block's
+    // text is empty — not the command line, which the head already shows.
+    const nl = out.indexOf("\n");
+    const cut = !block.command ? 0 : nl < 0 ? out.length : nl + 1;
+    block.runShift = cut;
+    block.buffer = out.slice(cut).replace(/\s+$/, "");
   }
 
   /**
@@ -1644,6 +1926,38 @@
     if (node && !reduceMotion) settle(node, 0.985);
     copyText(block, asMarkdown);
   }
+
+  /**
+   * Show the focused block as the bytes it arrived as, and back.
+   *
+   * The second consumer of the focus model, and the one it was built for — see
+   * phase-7-navigation.md. A crossfade rather than a swap: this is a state
+   * change on an object already on screen, and a cut reads as the block having
+   * been replaced by a different one.
+   *
+   * The reveal is killed rather than queued behind. An in-flight reveal is
+   * measured against a layout that is about to stop existing, and its teardown
+   * would restore text into elements the toggle has already unmounted.
+   */
+  function toggleRaw() {
+    const block = blocks.find((b) => b.id === focusedId);
+    if (!block) return notify("No block selected — ctrl+up selects one");
+    const log = rawLogs.get(block.id);
+    if (!block.raw && log?.dropped && !log.chunks.length) {
+      return notify("Raw bytes for this block were dropped — memory cap");
+    }
+    killReveals();
+    const flip = () => (block.raw = !block.raw);
+    const node = blockEl(block.id);
+    if (!node) return flip();
+    gsap.killTweensOf(node);
+    // 0.2s across both halves, per the durations table in docs/ANIMATION.md.
+    // Out is the shorter one and eased `in`: it is leaving.
+    gsap
+      .timeline()
+      .to(node, { autoAlpha: 0, duration: reduceMotion ? 0.05 : 0.08, ease: "power2.in", onComplete: flip })
+      .to(node, { autoAlpha: 1, duration: reduceMotion ? 0.05 : 0.12, ease: "power2.out" });
+  }
   // #endregion ────────────────────────────────────────────────────────────────
 
   /**
@@ -1656,8 +1970,23 @@
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
 
+  // The sixteen go in as well, so a program's red is the same red in the raw
+  // view and in a block. xterm cannot read CSS variables, which is the whole
+  // reason this function exists; `ansi.js` hands the *block* renderer the
+  // variable itself, and both resolve to the same token.
+  const ANSI_NAMES = [
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    "brightBlack", "brightRed", "brightGreen", "brightYellow",
+    "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+  ] as const;
+
   function xtermTheme() {
-    return { background: token("--surface-base"), foreground: token("--text") };
+    const theme: Record<string, string> = {
+      background: token("--surface-base"),
+      foreground: token("--text"),
+    };
+    ANSI_NAMES.forEach((name, i) => (theme[name] = token(`--ansi-${i}`)));
+    return theme;
   }
 
   /** Push the resolved tokens into everything that cannot read them itself. */
@@ -3632,7 +3961,17 @@
   //
   // The markdown form is reconstructed by the same parser that drives the
   // on-screen rendering — one source of truth for "what is a heading".
+  //
+  // A block being shown raw copies raw. Copying the rendering out of a block
+  // that is on screen *as bytes* would be answering a different question than
+  // the one the screen is currently asking — and the raw copy is what a bug
+  // report needs. The full set of copy modes is phase-13's; this is the one
+  // that has to exist the moment the toggle does.
   function copyText(block: Block, asMarkdown: boolean) {
+    if (block.raw && !asMarkdown) {
+      navigator.clipboard.writeText(rawText(block));
+      return notify("Copied raw bytes");
+    }
     const text = asMarkdown ? toMarkdown(blockNodes(block)) : block.buffer;
     navigator.clipboard.writeText(text);
     notify(asMarkdown ? "Copied as markdown" : "Copied output");
@@ -3905,8 +4244,17 @@
       fontSize: 14,
       // Block text is read back from this buffer, so scrollback is the real
       // cap on how much of a long command's output survives.
-      // ponytail: fixed 20k rows; virtualise blocks if memory ever matters.
-      scrollback: 20000,
+      //
+      // 10k rows is the figure docs/PERFORMANCE.md mandates, and this was at
+      // twice it. A block older than the cap has already been snapshotted and
+      // closed, so what it loses is the ability to be re-read — `snapshot`
+      // already bails on a marker the buffer has trimmed out from under it.
+      //
+      // ponytail: this caps xterm's cell memory, not the block DOM, which is
+      // still unbounded. Virtualisation is deliberately not written yet:
+      // PERFORMANCE.md says to measure `content-visibility` alone at 100k lines
+      // before adding a windowing layer, and that measurement has not happened.
+      scrollback: 10000,
       theme: xtermTheme(),
     });
     term = t;
@@ -3998,6 +4346,15 @@
           e.preventDefault();
           e.stopPropagation();
           if (e.type === "keydown") copyFocused(e.key === "m" || e.key === "M");
+          return false;
+        }
+        // The raw toggle. Taken outright for the same reason as the copies —
+        // and more so here, because the webview binds Ctrl+Shift+R to a reload,
+        // which would throw the session away rather than merely doing nothing.
+        if (e.shiftKey && /^[rR]$/.test(e.key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.type === "keydown") toggleRaw();
           return false;
         }
       }
@@ -4164,6 +4521,12 @@
     // stall waiting for a reply nobody sent.
     const onData = new Channel<ArrayBuffer>();
     onData.onmessage = (bytes) => {
+      // Logged before the write, not inside the callback below: the callback
+      // runs after xterm has parsed the chunk, and `133;D` firing mid-parse
+      // closes the block — so by then the chunk that finished a command would
+      // be filed under no block at all. The tail it carries is cut in
+      // `rawText` instead, where a cut costs nothing.
+      logRaw(new Uint8Array(bytes));
       // The callback runs once xterm has parsed the chunk — reading the buffer
       // before that would snapshot a stale screen, and the OSC handlers above
       // have all fired by then.
@@ -4539,6 +4902,18 @@
                    would animate the chrome rather than the text. -->
               <div class="block-head" use:stickyHead><span class="head-text" use:reveal>&gt; {block.cwd}{#if block.command}<span class="block-sep">&nbsp;|&nbsp;</span><span class="block-command">{block.command}</span>{/if}</span></div>
             {/if}
+            {#if block.raw}
+              <!-- The bytes, as themselves. No reveal: this is a state change
+                   on a block already on screen, and the crossfade in
+                   `toggleRaw` is that gesture — a reveal here would animate the
+                   text a second time as though it had just arrived. Control
+                   characters are shown as glyphs, so an escape sequence in here
+                   cannot still be acting as one. -->
+              <pre class="raw-view">{visibleCtrl(rawText(block))}</pre>
+              {#if rawLogs.get(block.id)?.dropped}
+                <div class="raw-note">Truncated — this block passed the raw log's size cap.</div>
+              {/if}
+            {:else}
             {#each blockNodes(block) as node}
               {#if node.kind === "heading"}
                 {#if node.level === 3}
@@ -4575,7 +4950,7 @@
                      The box still animates — `boxIn` rises it into place before
                      the code types inside it. Unanimated, it was the one thing
                      in a block that simply appeared. -->
-                <pre class="code-block" use:boxIn><code class="code-text" use:reveal>{#each node.spans as span}{#if span.token}<span class="tok-{span.token}">{span.text}</span>{:else}{span.text}{/if}{/each}</code></pre>
+                <pre class="code-block" use:boxIn><code class="code-text" use:reveal>{#each node.spans as span}{#if span.token}<span class="tok-{span.token}">{span.text}</span>{:else}{#each tint(span.text, span.at, blockRuns(block.id), block.runShift) as piece}{#if piece.style}<span style={piece.style}>{piece.text}</span>{:else}{piece.text}{/if}{/each}{/if}{/each}</code></pre>
                 <!-- Trailing spacer, not margin on .code-block itself — a
                      margin would also apply above the block, doubling up
                      against the block-entrance gap already set by .scroll's
@@ -4596,9 +4971,10 @@
                      around them and is already on screen. The newline between
                      two lines is a real character because they sit in a `pre` —
                      a margin would be a different layout. -->
-                <pre class="block-body" class:bold={node.bold}>{#each lineParts(node.parts) as parts, i}{#if i}{"\n"}{/if}{#if parts.length}<span class="md-line" use:reveal>{#each parts as part}{#if part.kind === "link"}<a class="inline-link" href={part.text} target="_blank" rel="noreferrer">{part.text}</a>{:else if part.code}<code class="inline-code {part.kind ?? ''}">{part.text}</code>{:else}{part.text}{/if}{/each}</span>{/if}{/each}</pre>
+                <pre class="block-body" class:bold={node.bold}>{#each lineParts(node.parts) as parts, i}{#if i}{"\n"}{/if}{#if parts.length}<span class="md-line" use:reveal>{#each parts as part}{#if part.kind === "link"}<a class="inline-link" href={part.text} target="_blank" rel="noreferrer">{part.text}</a>{:else if part.code}<code class="inline-code {part.kind ?? ''}">{part.text}</code>{:else}{#each tint(part.text, part.at, blockRuns(block.id), block.runShift) as piece}{#if piece.style}<span style={piece.style}>{piece.text}</span>{:else}{piece.text}{/if}{/each}{/if}{/each}</span>{/if}{/each}</pre>
               {/if}
             {/each}
+            {/if}
             {#if block.closed && block.cwd}
               <!-- Swept, not pulsed: this is the one fully saturated run of
                    text in the block, which is tier 0's definition, and it says
@@ -4905,6 +5281,34 @@
     --ok: #4ade80;
     --err: #f87171;
     --neutral: #9ca3af;
+
+    /* The sixteen a program means when it says "red".
+
+       These are the terminal's palette, not the app's — a program picked one of
+       them, so what it resolves to is the terminal's answer and belongs in the
+       token layer where a theme can move it. The 216-colour cube and the
+       greyscale ramp above these are arithmetic and are computed in `ansi.js`;
+       only these sixteen are anyone's choice.
+
+       Tuned to sit in this palette rather than being the VGA originals, which
+       are far too saturated against these surfaces. Normal first, bright after,
+       in the order a program indexes them. */
+    --ansi-0: #16161c;
+    --ansi-1: #e05561;
+    --ansi-2: #62c073;
+    --ansi-3: #d5a458;
+    --ansi-4: #5a8ce8;
+    --ansi-5: #b57cdb;
+    --ansi-6: #48b0bd;
+    --ansi-7: #a1a1aa;
+    --ansi-8: #4a4a55;
+    --ansi-9: #f87171;
+    --ansi-10: #4ade80;
+    --ansi-11: #f0b429;
+    --ansi-12: #7aa2f7;
+    --ansi-13: #d4a3f5;
+    --ansi-14: #5ed4e0;
+    --ansi-15: #e4e4e7;
   }
 
   :global(html),
@@ -5676,6 +6080,25 @@
     /* The explicit exception in the brief. Code is mono in every mode,
        including the two where its container is not. */
     font-family: var(--font-mono);
+  }
+
+  /* The raw view. Monospace unconditionally, for the same reason a code block
+     is: this is a byte-for-byte reading and alignment is the whole point of it.
+     No background and no border — it is the block's body in this state, not a
+     box sitting inside the body. Muted, because a raw view is a diagnostic
+     rather than the thing you are meant to be reading. */
+  .raw-view {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .raw-note {
+    margin-top: 6px;
+    color: var(--err);
+    font-size: 12px;
   }
 
   /* Colour only. A code block's columns line up because every glyph is the

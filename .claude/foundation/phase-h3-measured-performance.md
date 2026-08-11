@@ -1,6 +1,6 @@
 # Phase H3 — Measured Performance
 
-**Status: not started.** Needs the `flood/` generators from [phase-h2-compatibility.md](phase-h2-compatibility.md), and is worth more after [phase-h1-raw-fidelity.md](phase-h1-raw-fidelity.md) because H1 adds retained bytes to the memory picture.
+**Status: the two implementation gaps that did not need a measurement first are closed (2026-08-10). Nothing has been measured.** `BENCHMARKS.md` exists and every row in it says *not measured*, which is the point of it. The `flood/` generators are in [phase-h2-compatibility.md](phase-h2-compatibility.md)'s `compat/make.mjs`.
 
 [../docs/PERFORMANCE.md](../docs/PERFORMANCE.md) says it itself, under *Open*:
 
@@ -69,6 +69,20 @@ Each one gets a number in `BENCHMARKS.md`, not a verdict.
 - RSS fresh, after 100k lines, and after a long session with H1's byte logs retained.
 - `yes` can be interrupted with one Ctrl+C, and the UI is responsive throughout.
 - **No optimisation lands without a before and after number in that file.** That is the point of the file.
+
+## Status / Learned
+
+**Coalescing landed without a timer, and that turned out to be the whole design.**
+
+The obvious implementation of "4 KB or 8 ms" is a flush thread on a timer. It is also a thread waking 125 times a second on a session where nothing is happening, which spends the one budget in this file that is written as *literally zero*. The two rules were in direct conflict and the idle one wins.
+
+What replaced it: a 64 KB read buffer, and **a read that comes back full means the pipe still has more queued**, so the loop keeps reading instead of sending. A read that does not fill the buffer means the stream has gone quiet, and that is the flush signal — arriving from the stream itself rather than from a clock. Latency is unchanged at idle, the message count drops by roughly eight under flood, and nothing ticks. `FLUSH_MAX` (256 KB) is what stops a sustained flood accumulating forever.
+
+**Coalescing creates a boundary that did not exist before**, and that boundary is ours rather than the stream's. `safe_cut` / `terminated` hold back a trailing unterminated escape sequence, with `MAX_HOLD` as the escape hatch so an overlong OSC splits rather than stalling the stream. Seven tests in `pty.rs`; `cargo test`.
+
+**Backpressure is not implemented and the reason is worth keeping.** Tauri channels do not acknowledge, so there is nothing to apply back-pressure *from*. It also may not be needed: the loop only reads as fast as it sends, and a reader that has stopped reading is what makes the OS pipe block the shell — the real backpressure was always the pipe. Carries a `ponytail:` naming the measurement that would reopen it.
+
+**xterm's scrollback went from 20,000 rows to the 10,000 this file mandates.** The block DOM is still unbounded, deliberately: this document says to measure `content-visibility` alone at 100k lines before writing a windowing layer, and that measurement has not happened. Adding paint containment blind would have been the same mistake as the timer — following one rule in this file by breaking another.
 
 ## Gotchas to watch
 

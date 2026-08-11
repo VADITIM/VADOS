@@ -1,6 +1,6 @@
 # Phase H1 — Raw Fidelity
 
-**Status: not started.** First phase of the Hardening group, and the one everything in Expansion sits on.
+**Status: all four items built, none verified on screen (2026-08-10).** First phase of the Hardening group, and the one everything in Expansion sits on.
 
 Two of the project's load-bearing statements are currently false in block mode, and both have the same cause.
 
@@ -69,6 +69,27 @@ The direction of derivation is the point: nodes come from the buffer, the buffer
 - The raw toggle on a focused block shows escape sequences and toggles back. Toggling twice returns the block to exactly what it was.
 - A block whose log was evicted says so.
 - RSS after 100k lines stays inside the PERFORMANCE.md budget with logs retained. If it does not, the AST eviction path is what gets exercised — not the byte cap.
+
+## Status / Learned
+
+**The byte log, the toggle and the block model landed together (2026-08-10).** `logRaw` / `rawText` / `toggleRaw` in `+page.svelte`, Ctrl+Shift+R, caps at 1 MiB per block and 24 MiB per session with oldest-first eviction. Notes from building it:
+
+- **The log is written before `t.write`, not in its callback.** The callback runs after xterm has parsed the chunk, and `133;D` fires mid-parse and closes the block — so the chunk that finished a command would have been filed under no block at all. Logging early means the chunk carries the next prompt behind the `D` marker, and that tail is cut in `rawText` instead, where a cut costs nothing.
+- **The start boundary is free and the end boundary is not.** `openBlock` runs when the user presses Enter, so the log already begins at the command echo — there is no start marker to look for. Which is as well: PowerShell's integration **never emits `133;C`**, so an output-start marker is not something that exists here. Do not write code that waits for one.
+- **`rawText` is cached on the log, keyed on chunk count.** The template reads it on every render and a block re-renders on every chunk. Carries a `ponytail:` naming the ceiling — a block left on the raw view *while* still producing output re-decodes from the top per chunk.
+- Copying a block that is showing raw copies the bytes. The rest of the copy modes are phase 13's; this one had to exist the moment the toggle did.
+
+**Colour landed by offset, and the offsets are found rather than threaded.** The choice was between rewriting every parser rule to carry positions and giving nodes source ranges; the third option considered and rejected was routing coloured blocks around the parser entirely, which would have been much smaller and would have traded away the structure that makes this a different terminal rather than a prettier one.
+
+What made it cheap: **every run of text a node holds is a verbatim substring of the buffer.** The parser joins lines and drops the odd backtick but it never rewrites text, so a cursor that only moves forward can find each run in order — `locate` in `parse.js`, one pass, no rule touched. Notes:
+
+- **Headings and list rows are walked but not marked.** They are not verbatim enough to colour, but skipping them entirely let a later part match text belonging to one of them. The check has a case for it, with the same word repeated either side of a heading.
+- **`locate` runs only when the block has runs**, so a session with no colour in it pays nothing and gets exactly the nodes the parser made.
+- **Runs stay in the pre-slice coordinates and `runShift` carries the difference.** Re-indexing every run when the echoed command line is dropped off the front is a walk over the whole array on every chunk; one subtraction inside `tint` is not.
+- **Reverse video is resolved at snapshot time, not at paint time.** A block has no terminal background to fall back on the way the raw view does, so "swap them" has to become two concrete values while the cell is still in hand.
+- **The sixteen palette colours are tokens (`--ansi-0` … `--ansi-15`), and xterm's theme now reads the same ones**, so a program's red is one colour in both views. The 216-colour cube and the greyscale ramp are arithmetic and are computed.
+- **A program's colour is not a label**, so it waves rather than sweeping under a bar. Recorded in `ANIMATION.md`: a tier is the parser's verdict, and a colour the program chose is not a verdict this app made — `ls --color` would otherwise put a bar over every filename on screen.
+- `ponytail:` on `rowRuns` — cell index is taken as character index, which drifts by one on a row containing a wide glyph. The *text* is unaffected, so the cost of being wrong is a colour boundary one character out on a CJK or emoji row.
 
 ## Gotchas to watch
 

@@ -4,6 +4,10 @@
 
 ### Output
 
+- Output keeps the colour the program gave it. A block read the text off the screen and threw every cell attribute away, so `git status` rendered monochrome and the only tint in a block was the one derived from the shape of the text. Both now apply: the program's colour where it said something, the parser's where it did not. The sixteen ANSI colours are themeable and are the same in a block and in the raw view.
+- A block can be shown as the bytes it arrived as, with Ctrl+Shift+R on the selected block, and copying it while it is raw copies those bytes. Every block now keeps its own byte log to do it with; before this the bytes were not kept at all, which is why the toggle never existed. Logs are capped and the oldest are dropped first, and a block that lost its own says so.
+- Output arrives in fewer, larger pieces. The reader now holds a chunk back while the pipe still has more queued, rather than sending every read straight through, and cuts where an escape sequence will not be split. Nothing ticks while the terminal is idle, and a stream that goes quiet is sent immediately.
+- Scrollback holds 10,000 rows rather than 20,000. The old figure was twice the budget the project is written against and nothing had been measured against either.
 - A list row waves character by character like the prose around it, and does so one beat ahead of it. Rising as one piece read as a row that had failed to animate.
 - Prose animates a line at a time. A command printing a line every second — a loop, a slow build — showed the first line rising and every line after it appearing with nothing, because the whole paragraph was one element and an element animates once.
 - The bar that sweeps a result line or a status heading is that status's colour, red or green, instead of the accent.

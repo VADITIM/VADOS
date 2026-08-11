@@ -509,6 +509,7 @@ Two rules hold it together:
 
 - **An empty tier is skipped, never held open.** The beats are contiguous, so the number of beats is the number of *kinds of thing* in the line — which is the information the stagger exists to carry. A line with no paths must not sit through a beat of nothing.
 - **Grey is never a label.** `md-heading-3` and `tok-str` are both bright and neither is tinted; both belong to the wave. The default in `labelTier` is `null` for the same reason: a class added anywhere in the renderer must not silently start sweeping a bar over itself.
+- **A program's own colour is not a label either, and this is the same rule rather than an exception to it.** Since H1 a block carries the SGR runs the program emitted, rendered as inline style with no class on them — so `labelTier` returns `null` and they wave like the prose they are. That is correct: a tier is *the parser's verdict* about what a run of text is, and a colour the program chose is not a verdict this app made. It also matters for density — `ls --color` would otherwise put a bar over every filename on the screen.
 
 Past `LABEL_MAX` labels a tier opens without bars. Fifty flags in a `--help` dump is fifty absolutely positioned divs for half a second, and at that density they read as one texture anyway.
 

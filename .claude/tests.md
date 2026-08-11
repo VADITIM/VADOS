@@ -8,205 +8,43 @@ Order matters: the top section is the newest.
 
 ---
 
-## 2026-08-09 (latest) — A paged command says `q`, not `ctrl+c`
-
-`git diff` showed `running · ctrl+c stops` while `less` held the keyboard, and `less` ignores an interrupt. The pager's own prompt (`:`, `(END)`, `--More--`) is still read out of the block first; a command that is known to page now says so on its own when that prompt is not recognised. `runHint` in `parse.js`.
-
-- [ ] `git diff` on something long enough to page. The foot reads **`q quits the pager · ctrl+c stops`**. Press `q`: the block ends. This is the report.
-- [ ] Same block, once you page down to the bottom: if the foot changes to `q quits · space pages · / searches`, the pager's prompt is being read and that is the stronger path working. **Say which of the two you saw** — if it is always the command-derived one, the prompt never reaches the block and that is worth knowing.
-- [ ] If it is still wrong, press F3 (or toggle the block to raw) and report **what the block's last line actually is** while `less` is waiting. That line is the evidence this reads.
-- [ ] `git --no-pager diff`, `git status`, `npm ls`. Back to `running · ctrl+c stops` — nothing that does not page may claim to.
-- [ ] `man ls` (Git Bash), or anything piped into `less`. Says `q quits the pager`.
-- [ ] `git commit -m "log this"`. Not paged — the subcommand is read in its own position, so a paged word inside a message must not trip it.
-
----
-
-## 2026-08-09 — The first Ctrl+C is the one that works
-
-The reported fault: keys that stop a program had to be pressed several times. A key pressed while the keyboard had drifted elsewhere is written through by hand, and that recovery excluded the three cases that mattered — raw mode had no recovery at all, `atPrompt` excluded every key pressed while a command was running, and a modifier chord was never written through. `keyBytes` / `appKey` in `+page.svelte`.
-
-**Every check below is "click something first, then press the key once."** That is the whole bug; pressing keys without clicking never showed it.
-
-- [ ] `ping -t 8.8.8.8`. Click a block, the banner, the empty space beside the input. Now press **Ctrl+C once**. It stops. This is the report.
-- [ ] Same, but click the cwd panel (Ctrl+B) or a folder in it first. One Ctrl+C.
-- [ ] `htop` or `vim` (raw mode). Click somewhere outside the terminal, then press `q` / Esc `:q` once. It reaches the program — before this there was nothing at all putting the keyboard back in raw mode.
-- [ ] `claude`, or anything else that repaints inline. Ctrl+C once after a click.
-- [ ] A command that asks something (`Read-Host`, a `y/n` prompt). Click a block, then type the answer. The **first** character lands.
-- [ ] With a command running, click a block and press Ctrl+C — the block's reveal stops as well; no bars are left drawn and no text is left half-animated.
-- [ ] Open settings (Shift+Esc), click the startup-directory field, type. The characters still land **in the field** — a real text field keeps every key, and that guard must not have been widened.
-- [ ] Ctrl+A, Ctrl+B, Ctrl+Shift+C after clicking a block. Each still does its own job rather than being sent to the shell as a control byte.
-- [ ] Without clicking anything at all, everything above behaves as it always did. This path only runs when the keyboard was somewhere else.
-
----
-
-## 2026-08-09 — Every row waves; settings moved to Shift+Esc
-
-The reported fault: `ping`'s first three replies rose as one piece and only the fourth waved. The tail element of an open block is held back from the character split because output is appended to it — but each row is the tail at the instant it lands, so every row was held and only the last was released, when the block closed. It is now held only while its line is unfinished (`tailComplete`, the cursor at column 0). Separately, the settings panel moved off Esc.
-
-- [ ] `ping 8.8.8.8`. **Every reply waves character by character as it lands**, including the first. This is the report.
-- [ ] Same run: the row currently being written is the only thing that may rise as one piece, and on line-at-a-time output like this you should not see even that.
-- [ ] `foreach ($i in 1..10) { $i; Start-Sleep 1 }`, `ls`, `npm ls`. Same: no row rises as one piece.
-- [ ] Something that prints without a newline and keeps going — `Write-Host -NoNewline`, a build's progress line, `curl` downloading. The half-written line must **not** tear, freeze mid-word, or show characters out of order. This is what the hold is for and the only way to see it fail.
-- [ ] `less` or another pager, and a command with a spinner. Unchanged from the section below — the repaint rule is separate and still applies.
-- [ ] **Shift+Esc** opens settings. Shift+Esc again closes it, with the same exit motion as before.
-- [ ] Bare **Esc** with the panel open still closes it. From inside the startup-directory field too.
-- [ ] Bare Esc with a suggestion strip up dismisses the strip, with a block selected deselects it, with the input selected (Ctrl+A) drops the selection. None of them open settings any more.
-- [ ] Bare Esc with **nothing** open, at a prompt with something typed: PSReadLine clears the line. That key is given back — this is the check that it actually arrived.
-- [ ] `vim`: Esc still leaves insert mode, and Shift+Esc reaches vim rather than opening the panel.
-- [ ] `/help` lists Shift+Esc and the new Esc line.
-
----
-
-## 2026-08-09 — Plain words run, and a table is one thing
-
-Two from the same report. Submitting `list` failed with a not-recognised error, so a plain word is now swapped for its command as the line is sent (`wordCommand`, `input.js`) — the shell echoes and records the real name. And `ls` came out as prose for its directory rows and a fenced diff for its file rows, because `-a----` is a dash followed by a letter and so is a diff's deleted line; a rule line (`---- ---- ----`) now takes the whole table as one node.
-
-- [ ] Type `list` and press Enter. `ls` runs, and the **block head reads `ls`**, not `list`. This is the report.
-- [ ] `remove tmp.txt`, `search foo`, `download <url>`. Each runs the real command with its arguments intact — nothing is lost, reordered or requoted.
-- [ ] `copy a b`, `move a b`, `kill 123`, `find x`. These are **not** swapped: the shell gets the word, because each of them already runs something. `clear` still clears the screen locally.
-- [ ] `git remove x`. Past the first word nothing is touched — the shell gets `git remove x` and complains, as it should.
-- [ ] Type `remo` and Tab. The strip still writes `rm`; half a word is never swapped on Enter.
-- [ ] Press ↑ after running `list`. The shell's history holds `ls` — what ran is what is remembered.
-- [ ] Paste `list` plus a newline in one go (Ctrl+V then Enter, or a paste that ends in a newline). It is **not** swapped, deliberately: the mirrored line lags a paste and a swap from a line we are not sure of would send something nobody typed. Report it if that reads wrong.
-- [ ] `ls` / `Get-ChildItem` in this repo. **One** block: header, rule line, folders and files all in the same box, columns aligned, `.svelte-kit` intact. Before, the folders were prose with tinted timestamps and the files were a separate fence.
-- [ ] `ls -la` in Git Bash, `docker ps`, `netstat -an`, `Get-Process`. Each is one aligned block, nothing split at a row boundary.
-- [ ] `git --no-pager diff`. Still a diff: `--- a/x.js` has text on the line, so it is not a rule line and nothing about diffs changed.
-- [ ] Output with a `-------` divider line under a heading. Unchanged — one dash run is a divider, and the prose around it must not be swallowed into a box.
-- [ ] `/help` lists both plain-word lines, including which words are never swapped.
-
----
-
-## 2026-08-09 — A spinner is not a repaint
-
-`npm ls --all` landing with no wave at all, reported against the section below. A block that loses height is flagged as a program redrawing its screen and never character-splits again; npm's progress spinner erases its own line, costs the block one row, and tripped that flag before the tree existed. The flag now needs a drop of more than two rows. Same root cause as the lone `\` — both are that spinner.
-
-- [ ] `npm ls --all`. The tree **waves character by character** as it lands. This is the report.
-- [ ] `npm install` in a fresh clone, or anything else with a progress line. Same: the output after the spinner waves.
-- [ ] `less` on a long file, paged through — the case the flag exists for. Rows repaint without tearing or freezing mid-word. If text ever sticks half-animated, the threshold is too high and that is worth saying.
-- [ ] `ping -t 8.8.8.8` for a while, then Ctrl+C. Rows still wave, nothing left stuck.
-
-### The mojibake is not ours
-
-`Get-Content CLAUDE.md` showing `â€"` where the file has `—` was measured, not guessed: Windows PowerShell 5.1 reads a file with no BOM as the ANSI codepage, so it corrupts the text before the terminal sees a byte. 31 of the first 60 lines of `CLAUDE.md` come back wrong; the same read with `-Encoding UTF8` comes back clean. Nothing was changed for it — a terminal that injected encoding defaults into the shell would be answering for the shell, and would break genuinely ANSI files in the other direction.
-
-- [ ] `Get-Content CLAUDE.md -Encoding UTF8`. No `â€`. This is the confirmation, and the workaround.
-- [ ] The same `Get-Content CLAUDE.md` in Windows Terminal or the raw console. It is mojibake there too — that is what says the terminal is not the one corrupting it.
-- [ ] With the clean read on screen, the check the mojibake was hiding: real headings, real fences, real lists, no invented headings, and `right-click` not read as a flag.
-
----
-
-## 2026-08-09 — Streaming prose animates per line; status bars; npm ls
-
-Three reports from the round above. Prose is now one element per line (`lineParts`, capped at `LINE_MAX`), so a line animates when it arrives. A reveal bar takes the status colour of what it uncovers. The final snapshot re-reads the block in full, which is the candidate fix for `npm ls` showing a lone `\`.
-
-- [ ] `foreach ($i in 1..10) { $i; Start-Sleep 1 }`. **Every number waves as it lands**, not just the first. This is the report.
-- [ ] Same run: the number currently arriving rises as one piece (it is live and cannot be split); the ones before it waved character by character.
-- [ ] `git status`, `npm --help`. Multi-line prose still reads as one paragraph — no extra gaps between lines, no lost blank lines, no line running off the right edge instead of wrapping.
-- [ ] A line longer than the window. It wraps inside the block as before and the wave crosses the wrap.
-- [ ] `git status` on a clean repo: the `done` bar is **green**, not purple. `git nope`: the `exit 1 · failed` bar is **red**.
-- [ ] A `warning:`/`error:` heading in output still sweeps a red bar (this is the case that already worked — it must not have regressed).
-- [ ] `npm ls`, several times. The block holds the dependency tree every time. A block showing only `\` is the reported bug and means the full re-read did not cover it — say so rather than assuming it is fixed.
-- [ ] `npm ls --all` or another long listing. It is not slower than before: the re-read at command end is one extra pass over the block's rows.
-- [ ] `cat` or `Get-Content` on a file of several thousand lines. Still lands promptly — past `LINE_MAX` lines the node is one element again, and this is the check that the cap is doing its job.
-
----
-
-## 2026-08-09 — Shortened cwd in the input bar
-
-`shortCwd` in `input.js`: past 30 characters the path shows its last three segments, one dot per segment above them. Display only — the bar's tooltip and every block head still carry the full path.
-
-- [ ] `cd` somewhere deep (`src/lib` in this repo). The bar reads `..../VADOS/src/lib` — dots first, then the last three folders.
-- [ ] `cd` somewhere short (`C:/Users/vadim`). Unchanged, no dots.
-- [ ] Hover the path in the bar. The tooltip is the full path.
-- [ ] Run a command from a deep folder. The **block head** shows the whole path, not the shortened one — the head is the record of where it ran.
-- [ ] Watch the submit handoff from a deep folder: the `>` mark carries the line into the block. The path must not visibly jump or re-letter mid-flight as the short form is replaced by the full one.
-- [ ] The caret and the typed text sit where they did — shortening the path must not move the input columns.
-
----
-
-## 2026-08-09 — Input keeps the keyboard; select-all is ours
-
-Four changes to the input bar. `selectAll` is a selection VAD/OS owns (Ctrl+A, or double-click on the bar) and the edit after it is replayed to the shell as backspaces and deletes. Tab is taken on the window in the capture phase so it can never move focus. A `focusout` watchdog puts the keyboard back on the input, and a key pressed while focus was already elsewhere is written through rather than dropped.
-
-**The focus one is the important one — it is the reported bug, and the rest is worth nothing if this is still wrong.**
-
-- [ ] Type something. Click the cwd panel (Ctrl+B), click a folder, click a block, click the empty space beside the input, click the banner. After **each** click, type — the characters appear. Not one of them may be swallowed.
-- [ ] Same round trip, but check the *first* character each time. That is the one the watchdog cannot save and the write-through has to.
-- [ ] Drag-select some output text with the mouse. It stays selected while the button is released. Then type — the text goes to the shell.
-- [ ] Open settings (Esc), click the startup-directory field, type. The text lands **in the field**, not at the prompt. Esc still closes the panel.
-- [ ] Type a command, press Ctrl+A. The whole input line is highlighted and **the page is not** — no block, no banner, nothing in the scrollback highlights.
-- [ ] With it selected, press Backspace. The whole line goes, not one character. This is the reported bug.
-- [ ] Select again and type a letter. The line is replaced by that letter.
-- [ ] Select again and press → or Home. The selection clears and the caret moves; nothing is deleted.
-- [ ] Double-click the input bar. Same selection, same Backspace behaviour.
-- [ ] Press Tab with a block clicked, with the panel open, and after clicking a link in output. Focus never lands in the output — Tab completes at the prompt every time.
-- [ ] `vim` or `htop` (raw mode). Ctrl+A, Tab and Esc all reach the app untouched.
-- [ ] `/help` lists Ctrl+A and the double-click.
-
----
-
-## 2026-08-09 — Commands found by their plain word
-
-`COMMAND_WORDS` in `input.js` maps an abbreviated command to the words for what it does; `wordSuggestions` matches them on the **first word only** and offers the command with the word as its hint. Nothing rewrites the line — the word is a search key, not an alias.
-
-- [ ] Type `remove` at the prompt. The strip offers `rm`, labelled `remove`. Tab writes `rm` — the typed word is erased, not appended to.
-- [ ] Type `list`, `copy`, `move`, `search`, `kill`, `clear`. Each finds its command (`ls`, `cp`, `mv`, `grep`, `taskkill`, `cls`).
-- [ ] Type `re`. Several commands match at once and each appears **once**, in the order `rm`, `mv`, `sed`, `curl` — `remove` and `delete` are both `rm` and must not offer it twice.
-- [ ] Type `c`. Real command names come first; the word matches are below them.
-- [ ] Type `git remove`. **No** word match — past the first word the strip is completing arguments.
-- [ ] Type `remove` and press **Enter** without taking the match — see the newest section, this behaviour was replaced.
-- [ ] `/help` lists the feature under Keys.
-
----
-
-## 2026-08-09 — Result line sweeps, and says what happened
-
-`resultPulse` is deleted; the result line is `use:reveal` at tier 0 (`block-result` in `labelTier`), rank 0 so it does not wait. Its text comes from `exitLabel` in `parse.js`, which names known codes and prints anything wider than a byte as hex.
-
-- [ ] `git status`. The `done` line **sweeps a bar** like a status heading, not the old scale-pop. It arrives as soon as the block closes, with no beat of waiting.
-- [ ] A failing command (`git nope`, `cd /nowhere`). The `exit …` line sweeps the same way and is red — the two must be the same gesture.
-- [ ] Ctrl+C a running command. The line reads `exit 130 · stopped (ctrl+c)` on POSIX, or `exit 0xc000013a · stopped (ctrl+c)` if Windows reports the NTSTATUS. Either way it must **not** be a bare negative number.
-- [ ] Whatever produced `exit -1978335212` before. It now reads `exit 0x8a150014` — no name (that code is not one anyone documents), but a value that can be searched.
-- [ ] A plain failure (`exit 1` from a script, a command that is not installed). Reads `exit 1 · failed` / `exit 127 · command not found`, decimal, not hex.
-- [ ] Scroll back over a finished block and resize the window. The result line settles in place rather than replaying, and no bar is left drawn over it.
-
----
-
-## 2026-08-09 — Code blocks last, code tokens ranked, run bar always
-
-Three changes. `revealRank` now offsets an element's **whole** reveal — rows at 0, prose at 0.2s, code blocks at 0.4s — labels included, so a block's own tiers play inside its late slot. `codeSpans` gained link, time and path tokens from the same shapes prose uses, ranked with their prose counterparts. The run bar is shown for as long as a command runs, not only while it has printed nothing.
-
-- [ ] `git diff --help` or anything with a fenced block. The prose and headings above the block land **first**, the code block starts after them, and inside it the flags sweep before the placeholders. Nothing about the block's order should look different from prose's — only when it starts.
-- [ ] Same output: a code block sitting *between* two paragraphs still goes last of the three, not in reading order.
-- [ ] A block with paths in it (`git status`, a stack trace, `ls -la` piped through something). Paths inside the code block are tinted in the complement hue, the same colour a path in prose gets, and they sweep a bar on the same beat.
-- [ ] A dev-server log or anything with `12:30:01` stamps inside a block. The timestamp is dim grey — chrome, not content — and does not read as brighter than the line it stamps.
-- [ ] A URL inside a code block is one whole underlined accent run. **Not** split into a path at its `//` or a time at its port — that is the precedence bug this ordering exists to prevent.
-- [ ] `git diff` on a real repo. `--git` is still a flag, `a/x.js b/x.js` is still plain, and columns still line up — a token that gained padding would shift every character after it on its row.
-- [ ] Run something slow that prints as it goes (`ping 8.8.8.8`, `npm ls --all`). The bar at the foot of the block **keeps running while output arrives** and is replaced by `done` / `exit n` when it finishes. This is the change — it used to vanish on the first line of output.
-- [ ] Run a fast command (`git status`). No bar flashes at all — the 0.35s delay still holds.
-- [ ] Ctrl+C a running command. The bar goes with the block closing, and nothing is left animating.
-
----
-
-## 2026-08-09 — List rows wave, one rank above prose
-
-Rows are character-split like any other prose now (`splittable` deleted), and the wave gained two ranks: a row waves a beat before ordinary prose, both still after every label tier. `waveRank` in `reveal-plan.js`; self-check passes.
-
-- [ ] `ping 8.8.8.8`. Each reply row **waves character by character** as it arrives — the same gesture prose gets, not the whole row rising as one piece. This is the reported fault.
-- [ ] Same run: the `##` headings above the lists still sweep their bar **first**, before any row waves.
-- [ ] A block holding both a list and a paragraph. The list rows wave one beat (0.2s) **ahead** of the plain prose, not together with it.
-- [ ] A list item containing a path or a `--flag`. The token still sweeps its bar and the grey text around it waves — the label must not be split into characters.
-- [ ] `ls` in a big folder. All visible rows wave, nothing stalls, scrolling down does not replay them. Per-row splitting is the cost of this change, so anything visibly slower than before is the regression to report.
-- [ ] Run a list command and toggle Ctrl+B mid-run, then resize. Rows settle in place, no leftover character spans, no row stuck invisible.
-
----
-
-## 2026-08-08 — Version bumped to 0.4.0
+## 2026-08-08 (latest) — Version bumped to 0.4.0
 
 Version fields only, in `tauri.conf.json`, `Cargo.toml`, `Cargo.lock`, `package.json` and `package-lock.json`. No code changed. `tauri.conf.json` is the one that reaches the built app, so it is the one worth a look.
 
-- [ ] `npm run tauri dev` still starts and the shell comes up. A malformed `tauri.conf.json` fails at launch, not at build.
-- [ ] `npm run tauri build` produces an installer named for **0.4.0**, and the installed app reports 0.4.0 in its properties.
+- [X] `npm run tauri dev` still starts and the shell comes up. A malformed `tauri.conf.json` fails at launch, not at build.
+- [X] `npm run tauri build` produces an installer named for **0.4.0**, and the installed app reports 0.4.0 in its properties.
+
+---
+
+## 2026-08-08 — A list row is the reveal unit
+
+The reveal moved from the `<ul>` to the `<li>`. Replaces the previous section's fix, which was a no-op for `ping`: that list was already the last element of an open block, so it was already unsplit — the actual fault was that only the first row or two ever animated at all.
+
+- [!] `ping 8.8.8.8`. **Every reply row animates as it arrives** — one a second, each rising into place. This is the one that was broken: rows 3 and 4 used to appear with no animation.
+-- No proper wave animatio per entry. They animate but not with an expected flow
+- [!] No row waves character by character. Each row arrives as one piece.
+--- Previous point
+- [X] The `##` headings above each list still sweep their bar.
+- [X] The bullet markers line up with their rows and nothing is left invisible after the run finishes. A row stuck at `visibility: hidden` is what a reveal that never ran looks like.
+- [X] `ls` in a folder with many entries, or `npm ls`. The visible rows animate, scrolling down does not replay them, and the whole thing does not stall — per-row should be *cheaper* than the old whole-list split, so anything slower than before is a regression worth reporting.
+- [X] Run a list command and toggle the panel (Ctrl+B) mid-run, then resize the window. Rows settle in place rather than replaying.
+- [?] `less` on a long file, then page through it. Rows repaint without tearing or leaving spans behind.
+- [X] Ordinary prose output — `git status`, `--help` text — still waves character by character. If that stopped, `splittable` is matching more than rows.
+
+---
+
+## 2026-08-08 — Lists do not character-wave (superseded by the section above)
+
+- [!] `ping 8.8.8.8`. The four reply rows arrive as **one piece** — the whole list rises together. No character-by-character stagger crossing from the end of one row to the start of the next.
+-- line 24
+- [X] Same run: the two `##` headings above the lists still sweep their bar. Only the list's prose changed.
+- [X] `npm ls` or anything with a long list. It still animates — one rise, not a flicker, and not nothing at all.
+- [!] A list with tinted tokens in it (a path or a `--flag` inside an item) still gets its bars swept over those tokens; only the grey text around them stopped waving.
+-- Wave animations in lists should retain as mentioned before
+- [!] Ordinary prose output — `git status`, `--help` text — still waves character by character. If that stopped too, the predicate is matching more than lists.
+-- stopped
+- [X] Scroll back over a finished `ping` and resize the window. The list settles in place rather than replaying.
 
 ---
 
@@ -216,94 +54,106 @@ The whole overlay — markup, CSS, entrance, exit, the label flicker — moved t
 
 ### It still looks like itself
 
-- [ ] Press Esc. The panel rises into place with the stutter, over a blurred backdrop, centred with an inset on all four sides — it must not slide in from an edge.
-- [ ] Every control is there and styled: the font X with its crossed bars, four wedges with the accent blob on the selected one, eight round swatches in a 3-wide grid, two switches with a sliding knob, the startup-directory field and Browse. Nothing unstyled, nothing collapsed to a bare button — that is what a lost stylesheet looks like.
-- [ ] The root-shell switch is still absent on Windows (it is Unix-only) and present on Arch.
-- [ ] Press Esc again. The panel accelerates away **upward**, against the direction it came from, and the backdrop fades with it. It must not vanish instantly — that is the exit tween failing to reach the panel across the new component boundary.
-- [ ] After it closes, type. The keyboard goes back to the shell rather than nowhere.
+- [!] Press Esc. The panel rises into place with the stutter, over a blurred backdrop, centred with an inset on all four sides — it must not slide in from an edge.
+-- It should slide in from the btoom and slide out to the top. VISIBILY
+- [X] Every control is there and styled: the font X with its crossed bars, four wedges with the accent blob on the selected one, eight round swatches in a 3-wide grid, two switches with a sliding knob, the startup-directory field and Browse. Nothing unstyled, nothing collapsed to a bare button — that is what a lost stylesheet looks like.
+- [!] The root-shell switch is still absent on Windows (it is Unix-only) and present on Arch.
+-- cant test now
+- [!] Press Esc again. The panel accelerates away **upward**, against the direction it came from, and the backdrop fades with it. It must not vanish instantly — that is the exit tween failing to reach the panel across the new component boundary.
+-- line 57
+- [X] After it closes, type. The keyboard goes back to the shell rather than nowhere.
 
 ### The controls still do what they say
 
-- [ ] Click each of the four font modes. The screen changes, and the label you clicked flickers with the RGB split. No flicker means `.glitch-char` is not matching any more.
-- [ ] Flip both switches. Same: the state moves, the knob slides, and the label on the side being moved *to* is the one that flickers.
-- [ ] Click several swatches. The tint follows everywhere — borders, the block rail, the caret — and `white` still reads as off-neutral rather than washing the borders out.
-- [ ] Set a startup directory with Browse. The native picker opens and the field takes the path.
-- [ ] Close the app and reopen it. Every setting comes back the way you left it.
-- [ ] Edit `config.toml` by hand to a nonsense accent (`accent = "chartreuse"`) and save. The app keeps whatever is on screen instead of clearing the tint.
-
+- [X] Click each of the four font modes. The screen changes, and the label you clicked flickers with the RGB split. No flicker means `.glitch-char` is not matching any more.
+- [X] Flip both switches. Same: the state moves, the knob slides, and the label on the side being moved *to* is the one that flickers.
+- [X] Click several swatches. The tint follows everywhere — borders, the block rail, the caret — and `white` still reads as off-neutral rather than washing the borders out.
+- [X] Set a startup directory with Browse. The native picker opens and the field takes the path.
+- [X] Close the app and reopen it. Every setting comes back the way you left it.
+- [!] Edit `config.toml` by hand to a nonsense accent (`accent = "chartreuse"`) and save. The app keeps whatever is on screen instead of clearing the tint.
+-- cant test, didnt use installer yet
 ### Reduced motion
 
-- [ ] Turn on the OS reduced-motion setting, then open and close the panel. It fades rather than stuttering, and no label flickers. This is the one that would silently break: `reduceMotion` is a prop now, and it had to become `$state` for the panel to ever see it change.
-
+- [!] Turn on the OS reduced-motion setting, then open and close the panel. It fades rather than stuttering, and no label flickers. This is the one that would silently break: `reduceMotion` is a prop now, and it had to become `$state` for the panel to ever see it change.
+-- didnt test now
 ---
 
 ## 2026-08-08 — Settings tables moved to `src/lib/settings.ts`
 
 Pure code move, no behaviour intended. The typecheck and the build pass, but neither of them opens the settings panel — everything below checks that the tables still reach the screen and still round-trip through `config.toml`.
 
-- [ ] Open settings (Esc, or the gear). Every row is there: four font modes, two scroll modes, two reveal modes, eight accent swatches — and the four font modes still sit in the X, one per corner, each with its own wedge styled.
-- [ ] Click through all four font modes and both reveal modes. Each one changes the screen, and the label glitches on the row you clicked.
-- [ ] Click several accent swatches. The tint follows everywhere — borders, the block rail, the caret — and `white` still reads as off-neutral rather than washing the borders out.
-- [ ] Close the app and reopen it. Every setting comes back the way you left it — that is the `Config` shape surviving the move.
-- [ ] Edit `config.toml` by hand to a nonsense accent (`accent = "chartreuse"`) and save. The app keeps whatever is on screen instead of clearing the tint — that is `pick`.
-
+- [!] Open settings (Esc, or the gear). Every row is there: four font modes, two scroll modes, two reveal modes, eight accent swatches — and the four font modes still sit in the X, one per corner, each with its own wedge styled.
+-- we will not use a gear icon. shift settings menu to ctrl + esc
+- [X] Click through all four font modes and both reveal modes. Each one changes the screen, and the label glitches on the row you clicked.
+- [X] Click several accent swatches. The tint follows everywhere — borders, the block rail, the caret — and `white` still reads as off-neutral rather than washing the borders out.
+- [X] Close the app and reopen it. Every setting comes back the way you left it — that is the `Config` shape surviving the move.
+- [!] Edit `config.toml` by hand to a nonsense accent (`accent = "chartreuse"`) and save. The app keeps whatever is on screen instead of clearing the tint — that is `pick`.
+-- didnt test now, no installer did
 ---
 
 ## 2026-08-08 — The cwd panel
 
 ### It opens, and it takes width
 
-- [ ] Press Ctrl+B. A panel appears down the right side, inset from all four edges, listing the current folder. Directories are tinted and sorted first, files after, each alphabetical.
-- [ ] The scrollback, the input bar **and** the suggestion strip all end short of it — nothing is hidden behind the panel. The strip is still centred, over the narrowed bar rather than over the window.
-- [ ] The output and the input bar **animate** to their narrower width — they must not snap. The panel's left edge and the terminal's right edge stay welded together the whole way; if they ever come apart it reads as two objects instead of one push.
-- [ ] Press Ctrl+B again. The panel slides off to the right and the terminal widens with it, in the same lockstep, a little faster.
-- [ ] Hammer Ctrl+B open/shut/open quickly. No half-open band left behind, no panel stranded mid-slide.
-- [ ] Watch the block text while the band moves. It re-wraps live (that is CSS doing it), and it must not visibly re-render or flicker per frame — the expensive resize work is deliberately held until the tween lands.
+- [!] Press Ctrl+B. A panel appears down the right side, inset from all four edges, listing the current folder. Directories are tinted and sorted first, files after, each alphabetical.
+-- works actually but spamming ctrl+b tends to close the panel instead of actually switching between open and close
+- [?] The scrollback, the input bar **and** the suggestion strip all end short of it — nothing is hidden behind the panel. The strip is still centred, over the narrowed bar rather than over the window.
+- [X] The output and the input bar **animate** to their narrower width — they must not snap. The panel's left edge and the terminal's right edge stay welded together the whole way; if they ever come apart it reads as two objects instead of one push.
+- [X] Press Ctrl+B again. The panel slides off to the right and the terminal widens with it, in the same lockstep, a little faster.
+- [!] Hammer Ctrl+B open/shut/open quickly. No half-open band left behind, no panel stranded mid-slide.
+--mentioned in line 99
+- [X] Watch the block text while the band moves. It re-wraps live (that is CSS doing it), and it must not visibly re-render or flicker per frame — the expensive resize work is deliberately held until the tween lands.
+-- General issue with side bar opening: it moves the output window view, doesnt keep it positioned at the current output block.
 
 ### The shell keeps wrapping in the right place
 
-- [ ] **The check that matters most.** With the panel open, run something that prints long rows (`git log --oneline`, or `ls` in a folder with long names). Every row must wrap where the block's edge is, with no stub line left behind it. If it wraps at the old full width, the PTY was not resized.
-- [ ] Close the panel and run it again: wrapping follows back out.
-- [ ] Toggle the panel **while a long command is still running**. The band moves, and the running block's text is re-read once at the end rather than per frame — check it does not end up truncated or doubled.
-- [ ] Open `vim` or `htop` with the panel open. Raw mode takes the whole window and Ctrl+B is left to the program.
-
+- [?] **The check that matters most.** With the panel open, run something that prints long rows (`git log --oneline`, or `ls` in a folder with long names). Every row must wrap where the block's edge is, with no stub line left behind it. If it wraps at the old full width, the PTY was not resized.
+-- this is working right i suppose?
+- [X] Close the panel and run it again: wrapping follows back out.
+- [X] Toggle the panel **while a long command is still running**. The band moves, and the running block's text is re-read once at the end rather than per frame — check it does not end up truncated or doubled.
+- [!] Open `vim` or `htop` with the panel open. Raw mode takes the whole window and Ctrl+B is left to the program.
+-- cant test now, windows doesnt have this
 ### The listing follows the shell
 
-- [ ] With the panel open, `cd` somewhere. The panel's title and list follow within a prompt.
-- [ ] With the panel open, create a file (`echo hi > tmp.txt`). It appears in the list after the command finishes — the listing is re-read once per prompt.
-- [ ] After a click the keyboard is still the shell's — type immediately, without clicking the terminal first.
+- [X] With the panel open, `cd` somewhere. The panel's title and list follow within a prompt.
+- [X] With the panel open, create a file (`echo hi > tmp.txt`). It appears in the list after the command finishes — the listing is re-read once per prompt.
+- [X] After a click the keyboard is still the shell's — type immediately, without clicking the terminal first.
 
 ### The tree
 
-- [ ] Every folder has an arrow to its left; files have the same width of blank, so names line up. Click an arrow: the folder opens under it, indented, and the arrow turns to point down.
-- [ ] Click the folder's **name**: same thing. Click again: it closes.
-- [ ] Open three levels deep. Indentation keeps stepping and the hover highlight is still the panel's full width at every level.
-- [ ] Collapse a folder that had children open, then reopen it — the children come back re-read, not stale.
-- [ ] `..` is the first row, and only at the top level — it must **not** appear inside expanded subfolders, where the parent is already the row above.
-- [ ] Click `..`: `cd ..` replaces the prompt line and does not run. Press Enter — the panel now shows the parent, and `..` is there again, so going up repeatedly works.
-- [ ] Shift+click `..`: the same thing, not a second behaviour.
-- [ ] With something expanded, run a command that writes a file into that subfolder. It appears at the next prompt; the expansion is not lost.
-- [ ] `cd` somewhere else. The tree resets to the new folder with nothing expanded, and the old folder's contents must not flash back in a moment later.
+- [X] Every folder has an arrow to its left; files have the same width of blank, so names line up. Click an arrow: the folder opens under it, indented, and the arrow turns to point down.
+- [X] Click the folder's **name**: same thing. Click again: it closes.
+- [!] Open three levels deep. Indentation keeps stepping and the hover highlight is still the panel's full width at every level.
+-- it works good, a nice change would be here to accomodate it > resizable folder panel
+- [!] Collapse a folder that had children open, then reopen it — the children come back re-read, not stale.
+-- the children are also collapsed, they should not be
+- [!] `..` is the first row, and only at the top level — it must **not** appear inside expanded subfolders, where the parent is already the row above.
+-- clicking this should actually show you whats in the above it (only one deep)
+- [X] Click `..`: `cd ..` replaces the prompt line and does not run. Press Enter — the panel now shows the parent, and `..` is there again, so going up repeatedly works.
+- [X] Shift+click `..`: the same thing, not a second behaviour.
+- [X] With something expanded, run a command that writes a file into that subfolder. It appears at the next prompt; the expansion is not lost.
+- [X] `cd` somewhere else. The tree resets to the new folder with nothing expanded, and the old folder's contents must not flash back in a moment later.
 
 ### Clicking and shift-clicking
 
-- [ ] **Shift+click a folder.** The prompt line is *replaced* with `cd <path>` — anything already typed is gone, not left around it. It does **not** run; press Enter yourself.
-- [ ] Do the same with the caret parked in the *middle* of a half-typed command. Still a clean replace, nothing left to the right of where the caret was.
-- [ ] Shift+click a folder several levels deep: the path is relative to the prompt and the `cd` actually lands there.
-- [ ] Shift+click a folder whose name has a space: the path is quoted and the `cd` works.
-- [ ] **Click a file.** The run-options strip comes up — the same one dropping a file on the window gives. For `x.sh` the first option is `bash x.sh`, for `x.py` a `python`, for `x.exe` the `&` call. The bare path and a `cd` are at the bottom.
-- [ ] Enter accepts there (that strip was summoned, not typed) and the command is written but **not run**.
-- [ ] Click a file with no known extension: there is still a sensible list, ending in the bare path.
+- [X] **Shift+click a folder.** The prompt line is *replaced* with `cd <path>` — anything already typed is gone, not left around it. It does **not** run; press Enter yourself.
+- [X] Do the same with the caret parked in the *middle* of a half-typed command. Still a clean replace, nothing left to the right of where the caret was.
+- [X] Shift+click a folder several levels deep: the path is relative to the prompt and the `cd` actually lands there.
+- [X] Shift+click a folder whose name has a space: the path is quoted and the `cd` works.
+- [X] **Click a file.** The run-options strip comes up — the same one dropping a file on the window gives. For `x.sh` the first option is `bash x.sh`, for `x.py` a `python`, for `x.exe` the `&` call. The bare path and a `cd` are at the bottom.
+- [X] Enter accepts there (that strip was summoned, not typed) and the command is written but **not run**.
+- [?] Click a file with no known extension: there is still a sensible list, ending in the bare path.
 
 ### Dragging out — the native drag
 
-- [ ] **The one that failed before.** Drag a `.png` from the panel into Paint, and into Aseprite. It opens. No stop cursor.
-- [ ] Drag one into Explorer / the file manager. Check the source file is **still where it was** — the mode is `copy`, so nothing may be moved or deleted. If any drag removes or alters a file, stop and report it.
-- [ ] A small accent-coloured square follows the cursor during the drag.
-- [ ] Drag a file from the panel back onto the VAD/OS window: the run-options strip comes up, same as an Explorer drop.
-- [ ] Drag a file from Explorer onto the window as before: unchanged.
-- [ ] **Press and release without moving**: that is still a click, and it opens the run options. It must not start a drag.
-- [ ] **Drag a file out and let go over another app, then look at the terminal**: the run-options strip must *not* be up. The click after a drag is deliberately swallowed.
+- [X] **The one that failed before.** Drag a `.png` from the panel into Paint, and into Aseprite. It opens. No stop cursor.
+- [X] Drag one into Explorer / the file manager. Check the source file is **still where it was** — the mode is `copy`, so nothing may be moved or deleted. If any drag removes or alters a file, stop and report it.
+- [?] A small accent-coloured square follows the cursor during the drag.
+-- there is none, just a drag and drop native os icon
+- [X] Drag a file from the panel back onto the VAD/OS window: the run-options strip comes up, same as an Explorer drop.
+- [X] Drag a file from Explorer onto the window as before: unchanged.
+- [X] **Press and release without moving**: that is still a click, and it opens the run options. It must not start a drag.
+- [X] **Drag a file out and let go over another app, then look at the terminal**: the run-options strip must *not* be up. The click after a drag is deliberately swallowed.
 - [ ] Drag a *folder* out. It should behave like any folder drag, and again the original must be untouched.
 - [ ] Start a drag and press Esc, or let go over nothing. Nothing is left stuck; the next click still works.
 
@@ -435,6 +285,10 @@ Pure code move, no behaviour intended. The typecheck and the build pass, but nei
 
 ### Streaming structure
 
+- [X] `ping -t 8.8.8.8` — no entry appears at the top and disappears again. Replies accumulate as list items and nothing already on screen is rebuilt. Ctrl+C to stop.
+- [X] `npm --help` — the whole block appears at once. No half-block that grows a second time.
+- [!] `npm ls --all` — an indeterminate bar appears beside `running · ctrl+c stops` while it works, then the whole block lands at once.
+--- Did not animate the list 
 - [ ] `cargo build` — run it in `src-tauri` (`cd src-tauri` first; there is no crate at the repo root). The bar must **not** appear once output is flowing, and the block must keep updating rather than waiting for the command to finish. Any long streaming command does as well — `npm install` in a fresh clone, or `ping -t`.
 
 ### The handoff
@@ -445,19 +299,28 @@ Pure code move, no behaviour intended. The typecheck and the build pass, but nei
 - [ ] A short command (`ls`) still reads as one gesture rather than a twitch.
 - [ ] Submit twice quickly. No leftover copy over the bar, and — the failure that matters — the path is never left clipped away. If the prompt ever comes back missing its path, that is this.
 - [ ] Esc into the settings panel mid-gesture, and Ctrl+C mid-gesture. Same check: the prompt comes back whole.
+- [X] The bar does not flash on a fast command (`git status`).
 
 ### The first-landing height transition
 
-- [ ] The growth happens **once**. Run `foreach ($i in 1..10) { $i; Start-Sleep 1 }`. The box glides open on the first number; every number after that only adds a row — the box must not glide, stretch or rubber-band again, and the input bar below it must not bounce once per second. Ten separate glides is the failure.
-- [ ] Resizing the window mid-transition. Run `Start-Sleep 2; npm --help`, then grab the window's right edge and keep dragging it back and forth through the moment the output lands. When you let go, the block's box fits its text: no empty gap under the last line, no text clipped off the bottom. A box stuck at a wrong height until the next command is the failure.
+- [X] `npm --help` — the box grows into its content over about half a second rather than snapping.
+- [?] The growth happens **once**. A streaming command must not tween its height on every chunk.
+- [?] Resizing the window mid-transition does not leave the box stuck at a wrong height.
 - [ ] The character wave still plays *after* the growth. The tween writes an inline height that starts below the natural one, and the growth observer read that as a program repainting its own screen — which flagged the block and took the wave off it permanently. `git --no-pager diff` on one small file is the clean test: bars sweep, then characters rise.
 
 ### Long output
 
-- [ ] `git --no-pager diff` in a repo with a large diff — close to instant, comparable to Windows Terminal. Time it roughly against `wt`. This is the standing performance check for every change above it: per-line prose elements, three more code-token shapes and per-row splitting all land here first.
+- [ ] `git --no-pager diff` in a repo with a large diff — close to instant, comparable to Windows Terminal. Time it roughly against `wt`.
 - [ ] While it lands, only what is in the viewport animates. Scroll down afterwards: the rest is simply there.
 - [ ] A very large diff renders untinted (no coloured flags inside the code block) — that is the 20k-character cap, not a bug. Under it, tinting still works: `git --no-pager diff` on a single small file.
 - [ ] Copy a large block (right-click) and confirm the text is complete and unchanged.
+
+### Markdown
+
+- [!] `Get-Content CLAUDE.md` — real headings, real fences, real lists. No invented headings, and `right-click` is not read as a flag.
+--- Weird symbols appearing out of nowhere like "â€". It seems to parse an .md file into .md, which is not needed. The system should know this.
+- [X] `git diff CLAUDE.md` — **not** markdown mode. It is a diff and must render as one.
+- [X] `Get-Content src-tauri/tauri.conf.json` — not markdown, no `#` headings invented.
 
 ### Parser
 

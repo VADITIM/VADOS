@@ -1,6 +1,6 @@
 # Phase H2 — Compatibility
 
-**Status: not started.** Depends on nothing. Runs after [phase-h1-raw-fidelity.md](phase-h1-raw-fidelity.md) only because H1 is cheaper and unblocks more.
+**Status: the suite exists and has never been run (2026-08-10).** `compat/` is built — generator, fixtures, checklist. Every row in `CHECKLIST.md` is unmarked, which is the honest state: nothing here has been checked against another terminal yet. Depends on nothing.
 
 *Compatibility first, beauty second* has been the first line of [../decisions.md](../decisions.md) since the beginning, and it has never been checked. Everything known about how VAD/OS behaves under a real TUI, a real `ssh` session, or an ANSI-heavy program is anecdote from whatever the author happened to run. Three of the five entries under *Blockers* in [../tasks.md](../tasks.md) are compatibility failures found by accident.
 
@@ -66,6 +66,19 @@ Moved out of [../tasks.md](../tasks.md), which leaves pointers.
 - `tmux` with its prefix intact — Ctrl+B is currently taken by the cwd panel in block mode, and raw mode is exempt by design. Confirm that exemption actually holds inside tmux.
 - Every fixture renders identically after a window resize, and after the cwd panel opens and closes.
 - A program VAD/OS has never seen — pick one nobody here has run — does not produce anything worse than a conventional terminal would.
+
+## Status / Learned
+
+**Built 2026-08-10, run zero times.**
+
+`compat/make.mjs` generates the fixtures rather than them being checked in — a file of raw ESC bytes is unreadable in a diff, and the flood set is 300 MB. The generator is the reviewable artefact; the fixtures are gitignored. `--flood` is opt-in.
+
+Two decisions worth recording:
+
+- **Fixtures are plain files, not per-shell scripts.** `cat` works in every shell on both platforms, and a `.sh` plus a `.ps1` would be the same fixture written twice — in a suite whose whole point is that it does not care which shell is hosting it.
+- **Each fixture is split into numbered sections.** So a failure is reported as "`ansi/erase.txt` section 4 leaves ten lines" rather than "erase is broken", which is the difference between a bug report and a mood.
+
+`CHECKLIST.md` carries `less` and `claude` already marked `[!]` with links to their blockers, per the rule above about not quietly omitting what is known broken.
 
 ## Gotchas to watch
 

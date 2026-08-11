@@ -8,6 +8,7 @@ import {
   runHint,
   exitLabel,
   lineParts,
+  locate,
   toMarkdown,
   codeSpans,
 } from "./parse.js";
@@ -637,5 +638,65 @@ assert.deepEqual(parse("## H\n\n# H2\n\nright-click in VAD/OS")[2].parts, [
 // A fence still streaming in is a fence. Waiting for its closer would make a
 // `cat` of a long file flip between two layouts mid-render.
 assert.equal(parse("```\nhalf a block", "cat a.md")[0].kind, "code");
+
+// ── locate ──────────────────────────────────────────────────────────────────
+// Every marked run has to point at itself. That is the one property worth
+// asserting and it is checkable without knowing any offset by hand: slice the
+// buffer at `at` and it must be the text that claimed it.
+/** @param {string} buffer */
+function offsetsPointAtThemselves(buffer) {
+  const nodes = locate(parse(buffer), buffer);
+  let marked = 0;
+  for (const node of nodes) {
+    const runs = node.kind === "text" ? node.parts : node.kind === "code" ? node.spans : [];
+    for (const run of runs) {
+      if (run.at === undefined) continue;
+      assert.equal(buffer.slice(run.at, run.at + run.text.length), run.text, `at ${run.at}: ${run.text}`);
+      marked++;
+    }
+  }
+  return marked;
+}
+
+assert.ok(offsetsPointAtThemselves("plain words only") > 0);
+assert.ok(offsetsPointAtThemselves("see https://example.com/a and /usr/bin/env at 12:34:56") > 2);
+assert.ok(offsetsPointAtThemselves("Usage:\n  one\n  two\n\ntrailing prose --flag") > 0);
+assert.ok(offsetsPointAtThemselves("    let x = 1;\n    let y = 2;\n\nafter the block") > 0);
+// The case the whole scheme could have died on: `inlineParts` eats the
+// backticks, so a part is a substring that is *not* flush against the one
+// before it. A forward-only search steps over the gap; anything that assumed
+// the parts were contiguous would land one character early on every run after.
+assert.ok(offsetsPointAtThemselves("a `code` and C:/Users/vadim/x.txt after") > 0);
+// Repeated text, with a heading between: the cursor has to pass over the
+// heading or the later `dist` matches the earlier one.
+{
+  const buffer = "dist\n\nBuild failed: dist\n\ndist";
+  assert.ok(offsetsPointAtThemselves(buffer) > 0);
+}
+
+// A run the parser rewrote is left alone rather than guessed at.
+{
+  const nodes = locate([{ kind: "text", parts: [{ code: false, text: "not in the buffer" }] }], "something else");
+  assert.equal(nodes[0].parts[0].at, undefined);
+}
+
+// Splitting a part per line moves each piece's offset along by the line it
+// carries plus the newline that ended the one before it.
+{
+  const buffer = "alpha\nbeta\ngamma";
+  const [node] = locate(parse(buffer), buffer);
+  const lines = lineParts(node.parts);
+  assert.deepEqual(
+    lines.map((parts) => parts[0].at),
+    [0, 6, 11],
+  );
+  for (const parts of lines) {
+    for (const part of parts) assert.equal(buffer.slice(part.at, part.at + part.text.length), part.text);
+  }
+}
+
+// An unlocated part stays unlocated through the split, rather than picking up
+// an offset from the arithmetic.
+assert.equal(lineParts([{ code: false, text: "a\nb" }])[1][0].at, undefined);
 
 console.log("parse.js ok");

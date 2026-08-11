@@ -42,6 +42,7 @@ The plugins installed for this repo are not optional decoration. Use them by def
 - `src-tauri/src/screenshot.rs` — F2 debug capture. Writes `demo/` and rewrites the README gallery. Dev-only: the path comes from `CARGO_MANIFEST_DIR`.
 - `src/lib/parse.js` — output → AST. Self-check: `node src/lib/parse.check.mjs`.
 - `src/lib/settings.ts` — every setting as data: the keys `config.toml` stores, the labels the panel renders, what each mode resolves to. Data only — applying a setting is DOM and stays in the page.
+- `src/lib/ansi.js` — the program's own colour, mapped onto the parser's text by offset: the palette, a run's CSS, and the split. Self-check: `node src/lib/ansi.check.mjs`.
 - `src/lib/anim.ts` — the animation values more than one surface uses. A shared value is a statement that two surfaces are the same gesture; anything used once stays where it is used.
 - `src/lib/components/Settings.svelte` — the Esc overlay. Owns its markup, its CSS and both halves of its animation; the page owns the values and does the applying.
 - `src/lib/reveal-plan.js` — which reveal a run of parsed text gets, and in what order. Self-check: `node src/lib/reveal-plan.check.mjs`.

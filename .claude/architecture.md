@@ -182,6 +182,7 @@ src-tauri/src/
   screenshot.rs   F2 debug capture → demo/, rewrites the README gallery
 src/lib/
   parse.js        output → AST (headings, lists, code, inline code, tone)
+  ansi.js         the program's own colour, mapped onto that AST by offset
   input.js        the input bar's non-DOM half: suggestions, quoting, segments
   reveal-plan.js  which reveal a run of parsed text gets, and in what order
   settings.ts     every setting as data — the keys config.toml stores

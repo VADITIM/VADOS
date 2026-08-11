@@ -33,11 +33,15 @@
  *   - inside a code block, three token *shapes* are tinted: CLI flags,
  *     `<placeholder>`s, and quoted strings. Colour only — see `codeSpans`
  *
+ * `at` on a part or a span is where that run of text starts in the buffer it
+ * was parsed from. Set by `locate`, never by the parser itself, and absent
+ * unless something asked for it — see that function.
+ *
  * @typedef {"warn" | "ok" | null} Tone
  * @typedef {"link" | "path" | "time" | null} InlineKind
- * @typedef {{ code: boolean, text: string, kind?: InlineKind }} TextPart
+ * @typedef {{ code: boolean, text: string, kind?: InlineKind, at?: number }} TextPart
  * @typedef {"flag" | "var" | "str" | "link" | "time" | "path" | null} CodeToken
- * @typedef {{ token: CodeToken, text: string }} CodeSpan
+ * @typedef {{ token: CodeToken, text: string, at?: number }} CodeSpan
  * @typedef {{ kind: "heading", level: 2 | 3, text: string, tone: Tone }
  *          | { kind: "list", items: string[] }
  *          | { kind: "code", text: string, spans: CodeSpan[] }
@@ -704,6 +708,62 @@ function parseShellOutput(buffer) {
 }
 
 /**
+ * Marks every run of text in `nodes` with where it starts in `buffer`.
+ *
+ * The parser deals in strings and its nodes carry no position, which is fine
+ * until something outside it knows a fact about a *range of the buffer* and
+ * needs to put that fact on the screen. Colour is the first such thing: a
+ * program's own SGR runs are offsets into what arrived, and without an anchor
+ * there is no way to say which rendered word they belong to.
+ *
+ * **Found rather than threaded.** Every run of text a node holds is a verbatim
+ * substring of the buffer — the parser joins lines and drops the odd backtick,
+ * but it never rewrites text — so a cursor that only ever moves forward can
+ * find each one in order. Threading offsets through every rule instead would
+ * touch each of them and buy the same answer.
+ *
+ * Headings and list rows are walked but not marked. They are not verbatim
+ * enough to colour (a bullet has been stripped, a label reworded), but the
+ * cursor has to pass over them or a later part matches text that belongs to
+ * one of them instead of to itself.
+ *
+ * A run that cannot be found is left unmarked and the cursor does not move, so
+ * one failure costs that run its colour and nothing else. That is also what
+ * happens to the whole markdown path, whose text is not verbatim by design.
+ *
+ * @param {Node[]} nodes @param {string} buffer @returns {Node[]}
+ */
+export function locate(nodes, buffer) {
+  let at = 0;
+  /** @param {string} text @returns {number} */
+  const step = (text) => {
+    if (!text) return -1;
+    const i = buffer.indexOf(text, at);
+    if (i < 0) return -1;
+    at = i + text.length;
+    return i;
+  };
+  for (const node of nodes) {
+    if (node.kind === "text") {
+      for (const part of node.parts) {
+        const i = step(part.text);
+        if (i >= 0) part.at = i;
+      }
+    } else if (node.kind === "code") {
+      for (const span of node.spans) {
+        const i = step(span.text);
+        if (i >= 0) span.at = i;
+      }
+    } else if (node.kind === "heading") {
+      step(node.text);
+    } else {
+      for (const item of node.items) step(item);
+    }
+  }
+  return nodes;
+}
+
+/**
  * Renders parsed nodes back out as real markdown syntax, for "copy as .md".
  * @param {Node[]} nodes
  * @returns {string}
@@ -759,11 +819,20 @@ export function lineParts(parts, max = LINE_MAX) {
   const lines = [[]];
   for (const part of parts) {
     const pieces = part.text.split("\n");
+    // A split piece starts further into the buffer than the part it came from,
+    // and by exactly the pieces before it plus the newlines between them. A
+    // part with no `at` keeps none: an offset that is wrong is worse than one
+    // that is missing, because only the missing one degrades quietly.
+    let at = part.at;
     for (let i = 0; i < pieces.length; i++) {
       if (i) lines.push([]);
       // An empty piece is the line break itself — the break is carried by the
       // new group, so there is nothing to add to it.
-      if (pieces[i]) lines[lines.length - 1].push({ ...part, text: pieces[i] });
+      // `at` is added only when there is one. An `at: undefined` key would
+      // change the shape of every part in the app to carry a field almost
+      // nothing sets.
+      if (pieces[i]) lines[lines.length - 1].push(at === undefined ? { ...part, text: pieces[i] } : { ...part, text: pieces[i], at });
+      if (at !== undefined) at += pieces[i].length + 1;
     }
   }
   return lines.length > max ? [parts] : lines;
