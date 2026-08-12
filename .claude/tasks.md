@@ -14,7 +14,7 @@ One entry = one line: what is wrong, where, what the fix is. Reasoning goes in [
 - [ ] **`PS_PROMPT` is PowerShell-only.** The input mirror strips a literal prompt template out of the cursor row. General fix is a marker at OSC 133 `B`, not a remembered column (tried, reverted). First task of [foundation/phase-12-shell-hosting.md](foundation/phase-12-shell-hosting.md); until it lands, bash or WSL inherits a broken input bar.
 - [ ] **True squircle corners.** No native CSS outside Chromium's unshipped `corner-shape`; placeholder is `border-radius`. Real fix is a `clip-path` superellipse per block — note the hover ring's mask assumes `border-radius: inherit`, so both want solving at once.
 - [ ] **Markdown renderer choice.** Owned by [foundation/phase-8-document-engine.md](foundation/phase-8-document-engine.md).
-- [ ] **Unicode width is unchecked.** A rendered block's columns line up only while every glyph is one cell wide, which CJK, emoji, ZWJ sequences and combining marks all break. Invisible until someone runs `ls` in a directory of Japanese filenames. [foundation/phase-h2-compatibility.md](foundation/phase-h2-compatibility.md).
+- [ ] **Unicode width is unchecked.** A rendered block's columns line up only while every glyph is one cell wide, which CJK, emoji, ZWJ sequences and combining marks all break. Invisible until someone runs `ls` in a directory of Japanese filenames. The *colour* half of this is fixed — `rowRuns` counts characters rather than cells, so a run no longer drifts off its text on such a row — and `compat/unicode/width.txt` is the check nobody has run. [foundation/phase-h2-compatibility.md](foundation/phase-h2-compatibility.md).
 
 ## Awaiting confirmation on a rebuild
 

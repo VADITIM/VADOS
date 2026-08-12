@@ -8,7 +8,20 @@ Order matters: the top section is the newest.
 
 ---
 
-## 2026-08-08 (latest) — Version bumped to 0.4.0
+## 2026-08-12 (latest) — Colour runs are indexed by character, not by cell
+
+`rowRuns` moved out of `+page.svelte` into `src/lib/ansi.js` and now advances by the characters a cell holds instead of by the cell. `node src/lib/ansi.check.mjs` covers the arithmetic; what it cannot cover is that the runs still reach the screen at all, so the first check below is the one that matters — a move that quietly stopped producing runs would leave every block monochrome and pass every assertion.
+
+- [ ] `git status` in this repo. Colour is still there in block mode. This is the whole of item 1 of phase H1 still working after the move; if a block came back grey, nothing else here is worth running.
+- [ ] `ls --color=always` (or `eza -l`) — the same colours as the raw view shows for the same command.
+- [ ] `node compat/make.mjs`, then `cat compat/unicode/width.txt`. Nothing needs to be *coloured* correctly here yet — what is being looked at is whether any colour that is there starts and ends on the glyph it belongs to, rather than a character early or late after a CJK or emoji row. Compare against Windows Terminal side by side and mark the row in `compat/CHECKLIST.md`.
+- [ ] Same file: report whether the **columns** line up in block mode. That half of the Unicode blocker is untouched by this change and is the thing the fixture was written for.
+- [ ] A program using reverse video — `printf '\e[7mreversed\e[0m\n'`. The swap still reads as a swap, and switching the accent or theme in settings while it is on screen now moves it with the theme instead of leaving it on the colour it was snapshotted at.
+- [ ] A block with no colour in it at all (`echo hi`) still renders with no styled spans. Inspect the DOM, not the screen — an unstyled run costs an element that should not exist.
+
+---
+
+## 2026-08-08 — Version bumped to 0.4.0
 
 Version fields only, in `tauri.conf.json`, `Cargo.toml`, `Cargo.lock`, `package.json` and `package-lock.json`. No code changed. `tauri.conf.json` is the one that reaches the built app, so it is the one worth a look.
 

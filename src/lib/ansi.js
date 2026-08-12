@@ -19,6 +19,8 @@
  *   bold: boolean, dim: boolean, italic: boolean, underline: boolean, strike: boolean
  * }} Run
  * @typedef {{ text: string, style: string }} Piece
+ * @typedef {import("@xterm/xterm").IBufferLine} IBufferLine
+ * @typedef {import("@xterm/xterm").IBufferCell} IBufferCell
  */
 
 /** The six levels the 216-colour cube is built from. */
@@ -72,6 +74,84 @@ export function runStyle(run) {
   const line = [run.underline ? "underline" : "", run.strike ? "line-through" : ""].filter(Boolean);
   if (line.length) out.push(`text-decoration:${line.join(" ")}`);
   return out.join(";");
+}
+
+/**
+ * Append the coloured runs of one buffer row to `runs`, in the coordinates of a
+ * row whose text starts at `base`.
+ *
+ * Only runs that say something are recorded. Default-attribute text — nearly
+ * all of it — costs one comparison per cell and produces nothing, which is what
+ * keeps `tint` returning a bare text node for almost every line.
+ *
+ * **Cells are counted, characters are indexed.** A run has to line up with the
+ * row's *text*, and the two are not the same length: a CJK glyph or an emoji is
+ * one character over two cells, and a combining mark is two characters in one.
+ * `translateToString` emits the cell's characters, so walking the same
+ * characters here is what keeps a colour boundary on the boundary. `len` bounds
+ * the walk in character space for the same reason — it is measured against the
+ * row's text, so a run can never claim more of it than there is.
+ *
+ * @param {IBufferLine} line @param {IBufferCell} cell the reused read cell
+ * @param {number} base @param {number} len @param {Run[]} runs
+ */
+export function rowRuns(line, cell, base, len, runs) {
+  /** The run being accumulated, still open. */
+  let open;
+  /** Where the walk has got to in the row's *text*. */
+  let ci = 0;
+  for (let x = 0; x < line.length && ci < len; x++) {
+    if (!line.getCell(x, cell)) break;
+    // A cell of width 0 is the second half of a wide glyph. It carries no
+    // characters of its own and `translateToString` skips it, so it must not
+    // advance the character index — and extending the open run over it is
+    // right, where starting a new one would split every wide character in two.
+    if (cell.getWidth() === 0) continue;
+    // An empty cell is a space in the row's text, so it is still one character.
+    const n = cell.getChars().length || 1;
+    const at = base + ci;
+    ci += n;
+    const fgSet = !cell.isFgDefault();
+    const bgSet = !cell.isBgDefault();
+    const inverse = !!cell.isInverse();
+    if (!fgSet && !bgSet && !cell.isBold() && !cell.isDim() && !cell.isItalic() && !cell.isUnderline() && !cell.isStrikethrough() && !inverse) {
+      open = undefined;
+      continue;
+    }
+    const fg = fgSet ? (cell.isFgRGB() ? rgbColor(cell.getFgColor()) : paletteColor(cell.getFgColor())) : "";
+    const bg = bgSet ? (cell.isBgRGB() ? rgbColor(cell.getBgColor()) : paletteColor(cell.getBgColor())) : "";
+    /** @type {Run} */
+    const next = {
+      at,
+      end: at + n,
+      // Reverse video is resolved here rather than at paint time: which two
+      // values are being swapped is a fact about the cell, and the cell is only
+      // in hand now. What the *unset* side falls back to stays a token, so a
+      // reverse-video run still follows the theme the way the raw view does.
+      fg: inverse ? bg || "var(--surface-base)" : fg,
+      bg: inverse ? fg || "var(--text)" : bg,
+      bold: !!cell.isBold(),
+      dim: !!cell.isDim(),
+      italic: !!cell.isItalic(),
+      underline: !!cell.isUnderline(),
+      strike: !!cell.isStrikethrough(),
+    };
+    if (
+      open &&
+      open.end === next.at &&
+      open.fg === next.fg &&
+      open.bg === next.bg &&
+      open.bold === next.bold &&
+      open.dim === next.dim &&
+      open.italic === next.italic &&
+      open.underline === next.underline &&
+      open.strike === next.strike
+    ) {
+      open.end = next.end;
+      continue;
+    }
+    runs.push((open = next));
+  }
 }
 
 /**

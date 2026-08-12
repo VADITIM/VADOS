@@ -5,6 +5,7 @@
 ### Output
 
 - Output keeps the colour the program gave it. A block read the text off the screen and threw every cell attribute away, so `git status` rendered monochrome and the only tint in a block was the one derived from the shape of the text. Both now apply: the program's colour where it said something, the parser's where it did not. The sixteen ANSI colours are themeable and are the same in a block and in the raw view.
+- Colour lands on the right characters on a row containing a CJK glyph, an emoji or a combining mark. Runs were indexed by terminal cell, and those characters do not take one cell each, so every colour boundary after one of them sat a character or two off the text it belonged to.
 - A block can be shown as the bytes it arrived as, with Ctrl+Shift+R on the selected block, and copying it while it is raw copies those bytes. Every block now keeps its own byte log to do it with; before this the bytes were not kept at all, which is why the toggle never existed. Logs are capped and the oldest are dropped first, and a block that lost its own says so.
 - Output arrives in fewer, larger pieces. The reader now holds a chunk back while the pipe still has more queued, rather than sending every read straight through, and cuts where an escape sequence will not be split. Nothing ticks while the terminal is idle, and a stream that goes quiet is sent immediately.
 - Scrollback holds 10,000 rows rather than 20,000. The old figure was twice the budget the project is written against and nothing had been measured against either.

@@ -28,7 +28,7 @@
   } from "$lib/parse.js";
   // The program's own colour, mapped onto the parser's text by offset. Pure and
   // checked without a browser: `node src/lib/ansi.check.mjs`.
-  import { paletteColor, rgbColor, tint, type Run } from "$lib/ansi.js";
+  import { rowRuns, tint, type Run } from "$lib/ansi.js";
   // Which reveal a run of parsed text gets, and in what order — read off the
   // classes the parser's own decisions put on it. Checked without a browser:
   // `node src/lib/reveal-plan.check.mjs`.
@@ -1226,76 +1226,13 @@
    */
   let cellBuf: IBufferCell | undefined;
 
-  /**
-   * Append the coloured runs of row `y` to `runs`, in the coordinates of a row
-   * whose text starts at `base`.
-   *
-   * Only runs that say something are recorded. Default-attribute text — nearly
-   * all of it — costs one comparison per cell and produces nothing, which is
-   * what keeps `tint` returning a bare text node for almost every line.
-   *
-   * ponytail: cell index is taken as character index. That holds for everything
-   * one cell wide, and drifts by a cell on a row containing a wide glyph — the
-   * *text* is unaffected either way, since it still comes from
-   * `translateToString`, so the cost of being wrong is a colour boundary one
-   * character out on a CJK or emoji row. Walk the cells for the text too if
-   * that ever matters; it means owning the trailing-whitespace trim as well.
-   */
-  function rowRuns(y: number, base: number, len: number, runs: Run[]) {
+  /** `rowRuns` for a row of the live buffer. The walk itself is `ansi.js`. */
+  function rowRunsAt(y: number, base: number, len: number, runs: Run[]) {
     const line = term?.buffer.active.getLine(y);
     if (!line) return;
     if (!cellBuf) cellBuf = term?.buffer.active.getNullCell();
     if (!cellBuf) return;
-    /** The run being accumulated, still open. */
-    let open: Run | undefined;
-    const width = Math.min(line.length, len);
-    for (let x = 0; x < width; x++) {
-      const cell = line.getCell(x, cellBuf);
-      if (!cell) break;
-      // A cell of width 0 is the second half of a wide glyph and carries the
-      // same attributes as the first — extending the open run over it is right,
-      // and starting a new one on it would split every wide character in two.
-      if (cell.getWidth() === 0) continue;
-      const fgSet = !cell.isFgDefault();
-      const bgSet = !cell.isBgDefault();
-      const inverse = !!cell.isInverse();
-      if (!fgSet && !bgSet && !cell.isBold() && !cell.isDim() && !cell.isItalic() && !cell.isUnderline() && !cell.isStrikethrough() && !inverse) {
-        open = undefined;
-        continue;
-      }
-      const fg = fgSet ? (cell.isFgRGB() ? rgbColor(cell.getFgColor()) : paletteColor(cell.getFgColor())) : "";
-      const bg = bgSet ? (cell.isBgRGB() ? rgbColor(cell.getBgColor()) : paletteColor(cell.getBgColor())) : "";
-      const next: Run = {
-        at: base + x,
-        end: base + x + 1,
-        // Reverse video is resolved here rather than at paint time. The block
-        // renderer has no terminal background to fall back on the way the raw
-        // view does, so "swap them" has to become two concrete values while the
-        // cell is still in hand.
-        fg: inverse ? bg || token("--surface-base") : fg,
-        bg: inverse ? fg || token("--text") : bg,
-        bold: !!cell.isBold(),
-        dim: !!cell.isDim(),
-        italic: !!cell.isItalic(),
-        underline: !!cell.isUnderline(),
-        strike: !!cell.isStrikethrough(),
-      };
-      if (
-        open &&
-        open.end === next.at &&
-        open.fg === next.fg &&
-        open.bg === next.bg &&
-        open.bold === next.bold &&
-        open.dim === next.dim &&
-        open.italic === next.italic &&
-        open.underline === next.underline &&
-        open.strike === next.strike
-      ) {
-        open.end = next.end;
-        continue;
-      }
-      runs.push((open = next));
-    }
+    rowRuns(line, cellBuf, base, len, runs);
   }
   // #endregion ────────────────────────────────────────────────────────────────
 
@@ -1414,7 +1351,7 @@
       const row = rowText(y);
       // Measured against the row's own text, so a run can never claim more
       // columns than the text it is colouring has characters.
-      rowRuns(y, out.length, row.length, runs);
+      rowRunsAt(y, out.length, row.length, runs);
       out += row;
       // A wrapped row continues the same logical line — no newline, otherwise
       // long output gains a break at every terminal width.

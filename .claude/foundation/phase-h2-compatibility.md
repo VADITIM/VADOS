@@ -80,6 +80,10 @@ Two decisions worth recording:
 
 `CHECKLIST.md` carries `less` and `claude` already marked `[!]` with links to their blockers, per the rule above about not quietly omitting what is known broken.
 
+**The Unicode-width blocker gave up half of itself without the suite being run (2026-08-12).** Writing the `unicode/width.txt` row's expectation down was enough to find that `rowRuns` indexed colour runs by cell and not by character, so on any row with a CJK glyph, an emoji or a combining mark the colour boundary sat off the text it was colouring. Fixed, with a self-check in `ansi.check.mjs` built on a fake buffer line — the run walk is now in `ansi.js` rather than the page, because a check that needs a live terminal is a check nobody runs. What remains of the blocker is the part only the screen can answer: whether a rendered block's *columns* still line up when a glyph takes two cells.
+
+The order is worth noting for the rest of this phase: the fixture did not have to run to be useful. Deciding what a row must show is where a compatibility suite pays first, and the three remaining blockers are all heuristics that should be left alone until the suite has actually produced evidence — per the last gotcha below.
+
 ## Gotchas to watch
 
 - **A fixture is only evidence if it fails when the code breaks.** A file of escape sequences nobody compares against anything is decoration. The comparison against another terminal is the test; the file is the input.

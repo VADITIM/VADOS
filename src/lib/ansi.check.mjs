@@ -1,7 +1,7 @@
 // Self-check for ansi.js. Plain node, no test framework:
 //   node src/lib/ansi.check.mjs
 import assert from "node:assert/strict";
-import { paletteColor, rgbColor, runStyle, tint } from "./ansi.js";
+import { paletteColor, rgbColor, rowRuns, runStyle, tint } from "./ansi.js";
 
 /** @param {Partial<import("./ansi.js").Run>} over */
 const run = (over) => ({
@@ -137,5 +137,113 @@ assert.deepEqual(tint("cdef", 2, [run({ at: 6, end: 9, fg: "#f00" })]), [{ text:
 
 // A run with no visible attributes does not split the text around it.
 assert.deepEqual(tint("abcdef", 0, [run({ at: 2, end: 4 })]), [{ text: "abcdef", style: "" }]);
+
+// ── rowRuns ─────────────────────────────────────────────────────────────────
+
+/**
+ * A fake buffer line, written the way xterm's own would be read.
+ *
+ * Each spec is one *cell*: the characters it holds, its width (2 for the first
+ * half of a wide glyph, 0 for the second), and a colour index or nothing. This
+ * is the whole of the surface `rowRuns` uses, and building it by hand is what
+ * makes the cell-versus-character question checkable without a terminal.
+ *
+ * @param {{ chars?: string, width?: number, fg?: number }[]} cells
+ */
+const line = (cells) => ({
+  length: cells.length,
+  getCell(x, out) {
+    const c = cells[x];
+    if (!c) return undefined;
+    Object.assign(out, {
+      _chars: c.chars ?? " ",
+      _width: c.width ?? 1,
+      _fg: c.fg,
+    });
+    return out;
+  },
+});
+
+/** The reused read cell, standing in for xterm's. */
+const cell = {
+  getChars: () => cell._chars,
+  getWidth: () => cell._width,
+  isFgDefault: () => cell._fg === undefined,
+  isFgRGB: () => false,
+  getFgColor: () => cell._fg,
+  isBgDefault: () => true,
+  isBgRGB: () => false,
+  getBgColor: () => 0,
+  isBold: () => false,
+  isDim: () => false,
+  isItalic: () => false,
+  isUnderline: () => false,
+  isStrikethrough: () => false,
+  isInverse: () => false,
+};
+
+/** @param {{ chars?: string, width?: number, fg?: number }[]} cells */
+const runsOf = (cells, base = 0, len = 100) => {
+  const out = [];
+  rowRuns(line(cells), cell, base, len, out);
+  return out;
+};
+
+const red = { fg: 1 };
+
+// Plain text produces nothing at all — the case that has to stay free.
+assert.deepEqual(runsOf([{ chars: "a" }, { chars: "b" }]), []);
+
+// Adjacent cells of equal attributes coalesce into one run; a gap ends it.
+assert.deepEqual(
+  runsOf([{ chars: "a", ...red }, { chars: "b", ...red }, { chars: "c" }, { chars: "d", ...red }]).map((r) => [r.at, r.end]),
+  [
+    [0, 2],
+    [3, 4],
+  ],
+);
+
+// `base` is the row's offset into the block's text, not a column.
+assert.deepEqual(runsOf([{ chars: "a", ...red }], 10).map((r) => [r.at, r.end]), [[10, 11]]);
+
+// A wide glyph is one character over two cells. The run must cover one
+// character, and everything after it must be indexed as if it were — this is
+// the drift that put a colour boundary a character out on a CJK row.
+{
+  const runs = runsOf([{ chars: "日", width: 2, ...red }, { width: 0 }, { chars: "x", ...red }]);
+  assert.deepEqual(
+    runs.map((r) => [r.at, r.end]),
+    [[0, 2]],
+  );
+  // And the same row's text is exactly two characters long, so the run ends
+  // where the text does rather than a cell past it.
+  assert.equal("日x".length, runs[0].end);
+}
+
+// The cell after a wide glyph, uncoloured, leaves the colour on the glyph only.
+assert.deepEqual(
+  runsOf([{ chars: "日", width: 2, ...red }, { width: 0 }, { chars: "x" }]).map((r) => [r.at, r.end]),
+  [[0, 1]],
+);
+
+// A combining mark is the opposite case: two characters in one cell.
+assert.deepEqual(
+  runsOf([{ chars: "é", ...red }, { chars: "x", ...red }]).map((r) => [r.at, r.end]),
+  [[0, 3]],
+);
+
+// An emoji is one cell, two code units, two cells wide — both corrections at
+// once, and the surrogate pair is what `out.length` counts.
+assert.deepEqual(
+  runsOf([{ chars: "😀", width: 2, ...red }, { width: 0 }, { chars: "!", ...red }]).map((r) => [r.at, r.end]),
+  [[0, 3]],
+);
+
+// `len` bounds the walk in character space: `translateToString` trims the row's
+// trailing blanks, so a run may never reach past the text that survived.
+assert.deepEqual(
+  runsOf([{ chars: "a", ...red }, { chars: "b", ...red }, { chars: "c", ...red }], 0, 2).map((r) => [r.at, r.end]),
+  [[0, 2]],
+);
 
 console.log("ansi.js ok");
