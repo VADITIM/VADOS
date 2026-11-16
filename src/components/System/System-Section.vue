@@ -13,7 +13,7 @@ import {
   SYSTEM_VERSION,
   systemAccents,
   systemFigures,
-  systemLaws,
+  systemSteps,
   systemPlatforms,
 } from '@/modules/systemRegistry';
 
@@ -86,12 +86,12 @@ function paddedNumber(value: number): string {
     </ul>
 
     <div class="system-columns">
-      <ol class="system-laws">
-        <li v-for="(law, lawIndex) in systemLaws" :key="law.title" class="system-law">
-          <span class="law-number tabular reveal-panel">{{ paddedNumber(lawIndex + 1) }}</span>
-          <div class="law-copy">
-            <LiftText class="law-title" tag="h3" :text="law.title" unit="block" />
-            <LiftText class="law-detail" tag="p" :text="law.detail" unit="block" />
+      <ol class="system-steps">
+        <li v-for="(step, stepIndex) in systemSteps" :key="step.title" class="system-step">
+          <span class="step-number tabular reveal-panel">{{ paddedNumber(stepIndex + 1) }}</span>
+          <div class="step-copy">
+            <LiftText class="step-title" tag="h3" :text="step.title" unit="block" />
+            <LiftText class="step-detail" tag="p" :text="step.detail" unit="block" />
           </div>
         </li>
       </ol>
@@ -252,18 +252,18 @@ function paddedNumber(value: number): string {
   }
 }
 
-.system-laws {
+.system-steps {
   display: grid;
   gap: 1.75rem;
 }
 
-.system-law {
+.system-step {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 1.25rem;
 }
 
-.law-number {
+.step-number {
   display: grid;
   place-items: center;
   width: 2.5rem;
@@ -273,19 +273,19 @@ function paddedNumber(value: number): string {
   font-size: 0.8rem;
 }
 
-.law-copy {
+.step-copy {
   display: grid;
   gap: 0.3rem;
 }
 
-.law-title {
+.step-title {
   @include heading;
   font-size: clamp(0.95rem, 1.25vw, 1.35rem);
   line-height: 1.3;
   color: $text-bright;
 }
 
-.law-detail {
+.step-detail {
   @include prose;
   font-size: 0.85rem;
 }

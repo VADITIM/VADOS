@@ -5,11 +5,26 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger';
 
 import LiftText from '@/components/Misc/Lift-Text.vue';
 import SweepLabel from '@/components/Misc/Sweep-Label.vue';
-import { accentStyle } from '@/modules/accentRoom';
+import { accentStyle, setStandingAccent, useAccentRoom } from '@/modules/accentRoom';
 import { useFullWidthText } from '@/modules/fitText';
-import { SCRUB_SMOOTHING_SECONDS, TYPE_INTERVAL_MILLISECONDS } from '@/modules/motionConstants';
+import {
+  BANNER_DOCK_SECONDS,
+  CUT_LEAVE_SECONDS,
+  PANEL_ENTER_SECONDS,
+  PREMISE_CHARACTER_SECONDS,
+  PREMISE_SLAB_SECONDS,
+  SCRUB_SMOOTHING_SECONDS,
+  TYPE_INTERVAL_MILLISECONDS,
+} from '@/modules/motionConstants';
 import { products } from '@/modules/productsRegistry';
-import { isReducedMotion, onIntroFinished, registerScrollSetup, scrollToTarget } from '@/modules/scrollEngine';
+import {
+  isReducedMotion,
+  onIntroFinished,
+  registerScrollSetup,
+  scrollToTarget,
+  scrollToTop,
+  setScrollPaused,
+} from '@/modules/scrollEngine';
 import { useSectionReveal } from '@/modules/sectionReveal';
 import { SYSTEM_VERSION } from '@/modules/systemRegistry';
 import heroBanner from '@/modules/heroBanner.txt?raw';
@@ -22,29 +37,29 @@ const HEAD_LIFT_PERCENT = -40;
 const FOOT_DROP_PERCENT = 60;
 const CONTENT_LEAVE_END = 0.22;
 const DOCK_START = 0.08;
-const DOCK_END = 0.46;
 const LARGEST_DOCKED_SCALE = 0.95;
 const DOCK_GAP_REM = 3;
 const CORNER_SCALE = 0.75;
 const CORNER_INSET_REM = 0.75;
 const CORNER_TRAVEL_SHARE = 0.5;
-const PREMISE_ENTER_START = 0.4;
-const PREMISE_ENTER_END = 0.53;
-const PREMISE_RISE_PERCENT = 6;
-const WORDS_START = 0.53;
-const WORDS_END = 0.88;
-const SLAB_END = 0.96;
 const bannerLines = heroBanner.replace(/\s+$/, '').split(/\r?\n/);
 const bannerWidth = Math.max(...bannerLines.map((line) => line.length));
 const TYPING_START_MILLISECONDS = 1500;
 const typedLine = `${products.length} products / 1 system / version ${SYSTEM_VERSION}`;
 const statementLines = ['Motion beyond decoration', 'reactive animations', '> guiding your eyes'];
 const slabWords = ['with', 'hierarchy.'];
-const leadingLines = statementLines.map((line) => line.split(' '));
-const lineOffsets = leadingLines.map((_, lineIndex) =>
-  leadingLines.slice(0, lineIndex).reduce((total, words) => total + words.length, 0),
-);
-const leadingWordCount = leadingLines.flat().length;
+let characterCount = 0;
+function typedWords(line: string): { text: string; start: number }[] {
+  return line.split(' ').map((text) => {
+    const word = { text, start: characterCount };
+    characterCount += text.length + 1;
+    return word;
+  });
+}
+const leadingLines = statementLines.map(typedWords);
+const totalCharacters = characterCount;
+const PREMISE_LEAVE_PERCENT = 4;
+const RETURN_START = 0.98;
 const statement = [...statementLines, slabWords.join(' ')].join(' ');
 
 const root = ref<HTMLElement | null>(null);
@@ -53,18 +68,25 @@ const titleBox = ref<HTMLElement | null>(null);
 const head = ref<HTMLElement | null>(null);
 const foot = ref<HTMLElement | null>(null);
 const premise = ref<HTMLElement | null>(null);
+const premiseLabel = ref<HTMLElement | null>(null);
 const slab = ref<HTMLElement | null>(null);
+const slabText = ref<HTMLElement | null>(null);
 const typedLength = ref(0);
-const litCount = ref(0);
+const typedCount = ref(0);
 const isSlabFull = ref(false);
 const isStill = ref(false);
 
 let dock = { x: 0, y: 0, scale: 1 };
 let corner = { x: 0, y: 0, scale: 1 };
-let dockShare = 0;
+const docking = { share: 0 };
+let dockTween: gsap.core.Tween | null = null;
 const cornerTravel = { share: 0 };
+let premiseTimeline: gsap.core.Timeline | null = null;
+let premiseLeave: gsap.core.Tween | null = null;
+let isReturning = false;
 
 useSectionReveal(root, 'intro');
+useAccentRoom(root, HERO_ACCENT);
 useFullWidthText(title);
 
 function typeLine(): void {
@@ -115,9 +137,9 @@ function measureDock(): void {
 function placeBanner(): void {
   const travel = gsap.parseEase('power2.inOut')(cornerTravel.share);
   const docked = {
-    x: dock.x * dockShare,
-    y: dock.y * dockShare,
-    scale: 1 + (dock.scale - 1) * dockShare,
+    x: dock.x * docking.share,
+    y: dock.y * docking.share,
+    scale: 1 + (dock.scale - 1) * docking.share,
   };
   gsap.set(titleBox.value, {
     x: docked.x + (corner.x - docked.x) * travel,
@@ -126,27 +148,103 @@ function placeBanner(): void {
   });
 }
 
-function applyProgress(progress: number): void {
+function applyProgress(progress: number, direction = 1): void {
   const leaveShare = gsap.parseEase('power2.in')(share(progress, 0, CONTENT_LEAVE_END));
   gsap.set(head.value, { yPercent: HEAD_LIFT_PERCENT * leaveShare, autoAlpha: 1 - leaveShare });
   gsap.set(foot.value, { yPercent: FOOT_DROP_PERCENT * leaveShare, autoAlpha: 1 - leaveShare });
 
-  dockShare = gsap.parseEase('power2.inOut')(share(progress, DOCK_START, DOCK_END));
-  placeBanner();
 
-  const enterShare = gsap.parseEase('power2.out')(share(progress, PREMISE_ENTER_START, PREMISE_ENTER_END));
-  gsap.set(premise.value, { yPercent: PREMISE_RISE_PERCENT * (1 - enterShare), autoAlpha: enterShare });
-  litCount.value = Math.ceil(share(progress, WORDS_START, WORDS_END) * leadingWordCount);
-  const slabShare = share(progress, WORDS_END, SLAB_END);
-  gsap.set(slab.value, { scaleX: slabShare });
-  isSlabFull.value = slabShare > 0.5;
+  if (isReturning) {
+    if (progress > 0 && direction < 0) return;
+    isReturning = false;
+  }
+  if (direction < 0 && progress < RETURN_START && premiseTimeline) returnToTop();
+  else if (progress >= DOCK_START) playPremise();
+}
+
+function moveBanner(target: number, onMoved?: () => void): void {
+  dockTween?.kill();
+  dockTween = gsap.to(docking, {
+    share: target,
+    duration: BANNER_DOCK_SECONDS,
+    ease: target > 0 ? 'power3.out' : 'power2.inOut',
+    onUpdate: placeBanner,
+    onComplete: onMoved,
+  });
+}
+
+function returnToTop(): void {
+  isReturning = true;
+  setScrollPaused(true);
+  leavePremise(() =>
+    moveBanner(0, () => {
+      setScrollPaused(false);
+      scrollToTop();
+    }),
+  );
+}
+
+function resetPremise(): void {
+  typedCount.value = 0;
+  isSlabFull.value = false;
+  gsap.set(slab.value, { scaleX: 0 });
+  gsap.set([slabText.value, premiseLabel.value], { clipPath: 'inset(0 100% 0 0)' });
+  gsap.set(premise.value, { autoAlpha: 0, yPercent: 0 });
+}
+
+function leavePremise(onLeft: () => void): void {
+  if (!premiseTimeline) return;
+  premiseTimeline.kill();
+  premiseTimeline = null;
+  premiseLeave = gsap.to(premise.value, {
+    autoAlpha: 0,
+    yPercent: PREMISE_LEAVE_PERCENT,
+    duration: CUT_LEAVE_SECONDS,
+    ease: 'power2.in',
+    onComplete: () => {
+      resetPremise();
+      onLeft();
+    },
+  });
+}
+
+function playPremise(): void {
+  if (premiseTimeline) return;
+  moveBanner(1);
+  premiseLeave?.kill();
+  premiseLeave = null;
+  resetPremise();
+  gsap.set(premise.value, { autoAlpha: 1 });
+  const typing = { count: 0 };
+  premiseTimeline = gsap
+    .timeline()
+    .to(typing, {
+      count: totalCharacters,
+      duration: PREMISE_CHARACTER_SECONDS * totalCharacters,
+      ease: 'none',
+      onUpdate: () => {
+        typedCount.value = Math.ceil(typing.count);
+      },
+    })
+    .to(slab.value, {
+      scaleX: 1,
+      duration: PREMISE_SLAB_SECONDS,
+      ease: 'power2.out',
+      onUpdate: () => {
+        isSlabFull.value = Number(gsap.getProperty(slab.value, 'scaleX')) > 0.5;
+      },
+    })
+    .to(slabText.value, { clipPath: 'inset(0 0% 0 0)', duration: PREMISE_SLAB_SECONDS, ease: 'power2.out' }, '<')
+    .to(premiseLabel.value, { clipPath: 'inset(0 0% 0 0)', duration: PANEL_ENTER_SECONDS, ease: 'power3.out' });
 }
 
 onMounted(() => {
+  setStandingAccent(HERO_ACCENT);
   if (isReducedMotion()) {
     typedLength.value = typedLine.length;
     isStill.value = true;
-    litCount.value = leadingWordCount;
+    typedCount.value = totalCharacters;
+    gsap.set([slabText.value, premiseLabel.value], { clipPath: 'inset(0 0% 0 0)' });
     isSlabFull.value = true;
     gsap.set(slab.value, { scaleX: 1 });
     return;
@@ -165,9 +263,10 @@ onMounted(() => {
       invalidateOnRefresh: true,
       onRefresh: (trigger) => {
         measureDock();
+        placeBanner();
         applyProgress(trigger.progress);
       },
-      onUpdate: (trigger) => applyProgress(trigger.progress),
+      onUpdate: (trigger) => applyProgress(trigger.progress, trigger.direction),
     });
     gsap.to(cornerTravel, {
       share: 1,
@@ -193,7 +292,7 @@ onMounted(() => {
       <LiftText
         class="hero-statement"
         tag="p"
-        text="Different Applications. A Single Experience."
+        text="One design, everywhere."
       />
       <a class="sweep-control is-primary reveal-panel" href="#products" @click.prevent="scrollToTarget('#products')">
         See the products
@@ -213,24 +312,27 @@ onMounted(() => {
       </h1>
     </div>
     <div ref="premise" class="hero-premise">
-      <p class="micro-label">( The premise )</p>
+      <p ref="premiseLabel" class="micro-label premise-label">( The premise )</p>
       <p class="premise-statement">
         <span class="visually-hidden">{{ statement }}</span>
         <span aria-hidden="true">
           <span v-for="(words, lineIndex) in leadingLines" :key="lineIndex" class="premise-line">
-            <template v-for="(word, wordIndex) in words" :key="wordIndex">
-              <span class="premise-word" :class="{ 'is-lit': lineOffsets[lineIndex] + wordIndex < litCount }">{{
-                word
-              }}</span>
+            <template v-for="word in words" :key="word.start">
+              <span class="premise-word"
+                ><span
+                  v-for="(character, characterIndex) in word.text"
+                  :key="characterIndex"
+                  class="premise-character"
+                  :class="{ 'is-typed': word.start + characterIndex < typedCount }"
+                  >{{ character }}</span
+                ></span
+              >
               {{ ' ' }}
             </template>
           </span>
           <span class="premise-phrase" :class="{ 'is-covered': isSlabFull }">
             <span ref="slab" class="premise-slab"></span>
-            <template v-for="word in slabWords" :key="word">
-              <span class="premise-word">{{ word }}</span>
-              {{ ' ' }}
-            </template>
+            <span ref="slabText" class="premise-slab-text">{{ slabWords.join(' ') }}</span>
           </span>
         </span>
       </p>
@@ -355,14 +457,26 @@ onMounted(() => {
   display: block;
 }
 
+.premise-label,
+.premise-slab-text {
+  clip-path: inset(0 100% 0 0);
+}
+
+.premise-slab-text {
+  display: inline-block;
+  color: $text-bright;
+}
+
 .premise-word {
   display: inline-block;
-  color: $text-faint;
-  transition: color $hover-out $ease-leave;
+  color: $text-bright;
+}
 
-  &.is-lit {
-    color: $text-bright;
-    transition: color $hover-in $ease-enter;
+.premise-character {
+  visibility: hidden;
+
+  &.is-typed {
+    visibility: visible;
   }
 }
 
@@ -373,7 +487,7 @@ onMounted(() => {
   padding: 0 0.18em;
   margin: 0 -0.18em;
 
-  &.is-covered .premise-word {
+  &.is-covered .premise-slab-text {
     color: $accent-ink;
   }
 }

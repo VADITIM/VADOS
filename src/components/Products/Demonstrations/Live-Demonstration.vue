@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue';
 
+import SweepLabel from '@/components/Misc/Sweep-Label.vue';
 import { isTouchOnly } from '@/modules/scrollEngine';
 
 defineProps<{ source: string; productName: string; size: string; hint: string }>();
@@ -37,6 +38,7 @@ function stop(): void {
 
 <template>
   <div class="live">
+    <SweepLabel class="micro-label live-notice" tag="p" text="This is a preview of an old version." />
     <div ref="stage" class="live-stage">
       <iframe
         v-if="isRunning"
@@ -70,6 +72,11 @@ function stop(): void {
   gap: 0.5rem;
   background: $sunken-deep;
   padding: 0.75rem;
+}
+
+.live-notice {
+  margin: 0;
+  color: $text-muted;
 }
 
 .live-stage {

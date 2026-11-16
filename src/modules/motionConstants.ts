@@ -23,3 +23,6 @@ export const CONTROL_STATE_SECONDS = 0.22;
 export const CUT_LEAVE_SECONDS = 0.21;
 export const TYPE_INTERVAL_MILLISECONDS = 60;
 export const SCRUB_SMOOTHING_SECONDS = 0.8;
+export const PREMISE_CHARACTER_SECONDS = 0.014;
+export const PREMISE_SLAB_SECONDS = 0.5;
+export const BANNER_DOCK_SECONDS = 0.9;

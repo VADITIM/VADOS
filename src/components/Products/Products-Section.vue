@@ -44,11 +44,6 @@ useSectionReveal(header);
           {{ product.name }}
         </a>
       </nav>
-      <LiftText
-        class="products-statement"
-        tag="p"
-        text="Each one is a different platform and a different engine. All of them move the same way."
-      />
       <SweepLabel class="micro-label products-notice" tag="p" text="( Previews are subject to change )" />
     </header>
     <div class="products-body">
@@ -147,14 +142,6 @@ useSectionReveal(header);
       transition: color $hover-in $ease-enter;
     }
   }
-}
-
-.products-statement {
-  @include heading;
-  grid-area: statement;
-  max-width: 26ch;
-  font-size: clamp(1.1rem, 2vw, 2.2rem);
-  color: $text-bright;
 }
 
 .products-notice {

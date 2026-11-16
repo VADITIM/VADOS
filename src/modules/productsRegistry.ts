@@ -16,6 +16,7 @@ export interface Product {
   headline: string;
   strengths: string[];
   repositoryUrl: string | null;
+  version: string;
   availability: string;
   demonstration: ProductDemonstration;
 }
@@ -26,14 +27,15 @@ export const products: Product[] = [
   {
     id: 'shell',
     name: 'Shell',
-    platform: 'Arch · Wayland',
+    platform: 'Linux (Arch) · any wlr-layer-shell compositor',
     stack: 'Quickshell · Qt 6 · QML',
     accent: '#0040ff',
-    headline: "Full-screen sections, motion-based navigation.",
+    headline: 'A Linux desktop environment.',
     strengths: [
-      "Tactile UI components, built to be felt, not just scrolled through.",
+      'Tactile UI. A sidebar that morphs and mutates into desktop menus.',
     ],
     repositoryUrl: `${GITHUB}/VADOS-SHELL`,
+    version: '0.1.1',
     availability: 'Public',
     demonstration: {
       kind: 'live',
@@ -48,12 +50,13 @@ export const products: Product[] = [
     platform: 'Windows · Linux',
     stack: 'Tauri v2 · SvelteKit · Rust',
     accent: '#8a2be2',
-    headline: "A Terminal focusing on UX.",
+    headline: 'GUI & CLI combined as one & .MD support.',
     strengths: [
-      "GUI based Terminal with actual features over bloat with the power of CLI.",
-      "Improve your Terminal sessions with readable output with support on markdown over markup.",
+      'Component based terminal.',
+      'Improved readability by containers & animations.',
     ],
     repositoryUrl: `${GITHUB}/VADOS-TERMINAL`,
+    version: '0.4.0',
     availability: 'Public',
     demonstration: {
       kind: 'screenshots',
@@ -63,14 +66,16 @@ export const products: Product[] = [
   {
     id: 'bubble',
     name: 'Bubble',
-    platform: 'Galaxy S25 · One UI 8',
+    platform: 'Android · One UI 8+',
     stack: 'Kotlin · WebView · Shizuku',
     accent: '#FFDD1B',
-    headline: "Heavily animated and optimized Dynamic Island and System Tray overhaul for Android.",
+    headline: 'Status Bar overhaul for One UI.',
     strengths: [
-      "Features everything and more as Apple's own Dynamic Island.",
+      'A Dynamic Island with deep system integration.',
+      'Replaces boring Samsung UI with animated VAD/OS UI.',
     ],
     repositoryUrl: `${GITHUB}/VADOS-BUBBLE`,
+    version: '0.6.7',
     availability: 'Public',
     demonstration: {
       kind: 'recording',
@@ -80,14 +85,16 @@ export const products: Product[] = [
   {
     id: 'gallery',
     name: 'Gallery',
-    platform: 'Android · Arch',
+    platform: 'Android · Windows · Linux (Arch)',
     stack: 'Kotlin · Jetpack Compose · Qt 6',
     accent: '#DC143C',
-    headline: "An image gallery for Android without the bloat.",
+    headline: 'A Gallery without the bloat.',
     strengths: [
-      "Enjoy eye-guiding animations with features that matter for everyday use.",
+      'Most relevant daily features.',
+      'Cohesive navigation and context menus.',
     ],
     repositoryUrl: `${GITHUB}/VADOS-GALLERY`,
+    version: '1.6.1',
     availability: 'Public',
     demonstration: {
       kind: 'stack',
@@ -96,17 +103,16 @@ export const products: Product[] = [
   {
     id: 'files',
     name: 'Files',
-    platform: 'Arch · Hyprland',
+    platform: 'Windows · Linux (Arch)',
     stack: 'Qt 6 · QML · C++',
     accent: '#f09b3a',
-    headline: 'A file manager where every folder change is a menu transition.',
+    headline: 'Styled file manager.',
     strengths: [
-      'Each place is a room with its own colour: Home green, Downloads blue, Trash crimson.',
-      'Drag and drop onto folders, tabs, path segments and other apps, with a hint at the pointer.',
-      'Quick look grows out of the tile it belongs to.',
-      'Tabs, split view, a details column, deep search and undo.',
+      'Customization.',
+      'Integrated features such as unzip, convert, etc.',
     ],
     repositoryUrl: `${GITHUB}/VADOS-Files`,
+    version: '1.0.0',
     availability: 'Public',
     demonstration: {
       kind: 'screenshots',
@@ -116,17 +122,17 @@ export const products: Product[] = [
   {
     id: 'notes',
     name: 'Notes',
-    platform: 'iPad · Windows · Linux',
+    platform: 'iPadOS 26+ · Windows · Linux (Arch)',
     stack: 'SwiftUI · Tauri · a shared Swift core',
     accent: '#5bfd5b',
-    headline: 'Handwritten notes on iPad and desktop from one core and one token file.',
+    headline: 'Handwriting Notes with embedded .MD support.',
     strengths: [
-      'Pen on a surface: ink, erase, lasso and palm rejection.',
-      'The schema, the journal, the merge and the sync live in a core with no platform in it.',
-      'One tokens.json defines colour, slots and motion for both clients.',
-      'Local first. The desktop app is a behaviour-for-behaviour port of the iPad one.',
+      'Infinite Canvas in A4 format, PDF supported.',
+      'Full dark mode compatibility.',
+      'Sync all notes with a single GitHub Token.',
     ],
     repositoryUrl: `${GITHUB}/VADOS-NOTES`,
+    version: '1.4.0',
     availability: 'Public · in progress',
     demonstration: {
       kind: 'ink',

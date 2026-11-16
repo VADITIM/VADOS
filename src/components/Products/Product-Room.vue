@@ -5,6 +5,7 @@ import LiftText from '@/components/Misc/Lift-Text.vue';
 import SweepLabel from '@/components/Misc/Sweep-Label.vue';
 import { accentStyle, useAccentRoom } from '@/modules/accentRoom';
 import type { Product } from '@/modules/productsRegistry';
+import { useLatestVersion } from '@/modules/releaseVersions';
 import { ROOM_REVEAL_START, useSectionReveal } from '@/modules/sectionReveal';
 
 import ProductMedia from './Product-Media.vue';
@@ -16,6 +17,8 @@ const COUNT_WIDTH = 2;
 const root = ref<HTMLElement | null>(null);
 
 const isMirrored = computed(() => props.roomIndex % 2 === 1);
+const latestVersion = useLatestVersion(props.product);
+const releaseLabel = computed(() => `v${latestVersion.value}`);
 const hasDemonstration = computed(() => props.product.demonstration.kind !== 'none');
 const roomLabel = computed(() => {
   const number = String(props.roomIndex + 1).padStart(COUNT_WIDTH, '0');
@@ -55,16 +58,19 @@ useAccentRoom(root, () => props.product.accent);
           <dd><LiftText :text="product.availability" unit="block" /></dd>
         </div>
       </dl>
-      <a
-        v-if="product.repositoryUrl"
-        class="sweep-control is-primary reveal-panel"
-        :href="product.repositoryUrl"
-        target="_blank"
-        rel="noopener"
-      >
-        Open repository
-        <span aria-hidden="true">↗</span>
-      </a>
+      <div class="room-release">
+        <a
+          v-if="product.repositoryUrl"
+          class="sweep-control is-primary reveal-panel"
+          :href="product.repositoryUrl"
+          target="_blank"
+          rel="noopener"
+        >
+          Open repository
+          <span aria-hidden="true">↗</span>
+        </a>
+        <SweepLabel class="micro-label room-version tabular" tag="span" :text="releaseLabel" />
+      </div>
     </div>
     <ProductMedia v-if="hasDemonstration" class="room-media" :product="product" />
   </article>
@@ -190,6 +196,17 @@ useAccentRoom(root, () => props.product.accent);
   height: 0.5rem;
   margin-top: 0.5em;
   background: $accent;
+}
+
+.room-release {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.25rem;
+}
+
+.room-version {
+  color: $text-label;
 }
 
 .room-facts {

@@ -1,4 +1,4 @@
-export interface SystemLaw {
+export interface SystemStep {
   title: string;
   detail: string;
 }
@@ -13,37 +13,41 @@ export interface SystemAccent {
   hex: string;
 }
 
-export const SYSTEM_VERSION = '6.3.4';
+declare const __SYSTEM_VERSION__: string | null;
 
-export const systemLaws: SystemLaw[] = [
+const RECORDED_SYSTEM_VERSION = '6.3.5';
+
+export const SYSTEM_VERSION = __SYSTEM_VERSION__ ?? RECORDED_SYSTEM_VERSION;
+
+export const systemSteps: SystemStep[] = [
   {
-    title: 'The border is the design.',
-    detail: 'Depth comes from a 1px hairline and translucency, never from a shadow.',
+    title: 'Name the roles before the values.',
+    detail: 'Every colour, size and duration is decided once, as a token, before a single screen exists.',
   },
   {
-    title: 'One accent per screen, inherited from the root.',
-    detail: 'A leaf component never names a colour.',
+    title: 'Write the decisions down.',
+    detail: 'A design system is a set of answers someone else can follow without asking.',
   },
   {
-    title: 'Every element has a start, maybe a middle, and always an end.',
-    detail: 'The end is faster, immediate, and never a reversed start.',
+    title: 'Build the foundation, then the components.',
+    detail: 'Type, spacing, colour and motion come first. Every component is assembled from them.',
   },
   {
-    title: 'A difference of amount is a ramp. A difference of kind is a branch.',
-    detail: 'Widths are neither.',
+    title: 'Prove it on one real product.',
+    detail: 'Real content is where the system meets its first contradictions, and gets corrected.',
   },
   {
-    title: 'If you cannot name an animation’s intent, it does not ship.',
-    detail: 'Arrival, departure, life or consequence.',
+    title: 'Port it, one platform at a time.',
+    detail: 'Each port keeps the decisions and changes only the syntax.',
   },
   {
-    title: 'Corners are squircle, and nothing else.',
-    detail: 'Text takes no radius.',
+    title: 'Keep one source of truth.',
+    detail: 'A change lands in the system first, then flows into every product.',
   },
 ];
 
 export const systemFigures: SystemFigure[] = [
-  { value: 6, label: 'Laws' },
+  { value: 6, label: 'Steps' },
   { value: 15, label: 'Foundation modules' },
   { value: 28, label: 'Built components' },
   { value: 8, label: 'Platforms' },
