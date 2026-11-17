@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 
@@ -13,30 +13,22 @@ import {
   PANEL_ENTER_SECONDS,
   PREMISE_CHARACTER_SECONDS,
   PREMISE_SLAB_SECONDS,
-  SCRUB_SMOOTHING_SECONDS,
   TYPE_INTERVAL_MILLISECONDS,
 } from '@/modules/motionConstants';
 import { products } from '@/modules/productsRegistry';
-import {
-  isReducedMotion,
-  onIntroFinished,
-  registerScrollSetup,
-  scrollToTarget,
-  scrollToTop,
-  setScrollPaused,
-} from '@/modules/scrollEngine';
+import { createSceneGate } from '@/modules/sceneGate';
+import { isReducedMotion, onIntroFinished, registerScrollSetup, scrollToTarget } from '@/modules/scrollEngine';
 import { useSectionReveal } from '@/modules/sectionReveal';
 import { SYSTEM_VERSION } from '@/modules/systemRegistry';
 import heroBanner from '@/modules/heroBanner.txt?raw';
 
 import LiquidTrail from './Liquid-Trail.vue';
 
+type Scene = 'opening' | 'premise';
+
 const HERO_ACCENT = '#7e55dd';
-const PIN_DISTANCE_SHARE = 1.2;
 const HEAD_LIFT_PERCENT = -40;
 const FOOT_DROP_PERCENT = 60;
-const CONTENT_LEAVE_END = 0.22;
-const DOCK_START = 0.08;
 const LARGEST_DOCKED_SCALE = 0.95;
 const DOCK_GAP_REM = 3;
 const CORNER_SCALE = 0.75;
@@ -59,7 +51,6 @@ function typedWords(line: string): { text: string; start: number }[] {
 const leadingLines = statementLines.map(typedWords);
 const totalCharacters = characterCount;
 const PREMISE_LEAVE_PERCENT = 4;
-const RETURN_START = 0.98;
 const statement = [...statementLines, slabWords.join(' ')].join(' ');
 
 const root = ref<HTMLElement | null>(null);
@@ -79,11 +70,11 @@ const isStill = ref(false);
 let dock = { x: 0, y: 0, scale: 1 };
 let corner = { x: 0, y: 0, scale: 1 };
 const docking = { share: 0 };
-let dockTween: gsap.core.Tween | null = null;
 const cornerTravel = { share: 0 };
-let premiseTimeline: gsap.core.Timeline | null = null;
-let premiseLeave: gsap.core.Tween | null = null;
-let isReturning = false;
+let scene: Scene = 'opening';
+let isSceneMoving = false;
+let sceneTimeline: gsap.core.Timeline | null = null;
+let removeSceneGate: (() => void) | null = null;
 
 useSectionReveal(root, 'intro');
 useAccentRoom(root, HERO_ACCENT);
@@ -93,10 +84,6 @@ function typeLine(): void {
   if (typedLength.value >= typedLine.length) return;
   typedLength.value += 1;
   window.setTimeout(typeLine, TYPE_INTERVAL_MILLISECONDS);
-}
-
-function share(progress: number, start: number, end: number): number {
-  return gsap.utils.clamp(0, 1, (progress - start) / (end - start));
 }
 
 function measureDock(): void {
@@ -114,7 +101,7 @@ function measureDock(): void {
   const lines = [...statementBox.querySelectorAll<HTMLElement>('.premise-line, .premise-phrase')];
   const sectionLeft = section.getBoundingClientRect().left;
   const textRight = Math.max(...lines.map((line) => line.getBoundingClientRect().right - sectionLeft));
-  const textBottom = statementBox.getBoundingClientRect().bottom - section.getBoundingClientRect().top;
+  const textBottom = statementBox.offsetTop + statementBox.offsetHeight + (premise.value?.offsetTop ?? 0);
   const remSize = parseFloat(getComputedStyle(document.documentElement).fontSize);
   const gap = DOCK_GAP_REM * remSize;
   const cornerScale = Math.min(CORNER_SCALE, (roomRight - roomLeft) / box.offsetWidth);
@@ -148,42 +135,6 @@ function placeBanner(): void {
   });
 }
 
-function applyProgress(progress: number, direction = 1): void {
-  const leaveShare = gsap.parseEase('power2.in')(share(progress, 0, CONTENT_LEAVE_END));
-  gsap.set(head.value, { yPercent: HEAD_LIFT_PERCENT * leaveShare, autoAlpha: 1 - leaveShare });
-  gsap.set(foot.value, { yPercent: FOOT_DROP_PERCENT * leaveShare, autoAlpha: 1 - leaveShare });
-
-
-  if (isReturning) {
-    if (progress > 0 && direction < 0) return;
-    isReturning = false;
-  }
-  if (direction < 0 && progress < RETURN_START && premiseTimeline) returnToTop();
-  else if (progress >= DOCK_START) playPremise();
-}
-
-function moveBanner(target: number, onMoved?: () => void): void {
-  dockTween?.kill();
-  dockTween = gsap.to(docking, {
-    share: target,
-    duration: BANNER_DOCK_SECONDS,
-    ease: target > 0 ? 'power3.out' : 'power2.inOut',
-    onUpdate: placeBanner,
-    onComplete: onMoved,
-  });
-}
-
-function returnToTop(): void {
-  isReturning = true;
-  setScrollPaused(true);
-  leavePremise(() =>
-    moveBanner(0, () => {
-      setScrollPaused(false);
-      scrollToTop();
-    }),
-  );
-}
-
 function resetPremise(): void {
   typedCount.value = 0;
   isSlabFull.value = false;
@@ -192,40 +143,36 @@ function resetPremise(): void {
   gsap.set(premise.value, { autoAlpha: 0, yPercent: 0 });
 }
 
-function leavePremise(onLeft: () => void): void {
-  if (!premiseTimeline) return;
-  premiseTimeline.kill();
-  premiseTimeline = null;
-  premiseLeave = gsap.to(premise.value, {
-    autoAlpha: 0,
-    yPercent: PREMISE_LEAVE_PERCENT,
-    duration: CUT_LEAVE_SECONDS,
-    ease: 'power2.in',
-    onComplete: () => {
-      resetPremise();
-      onLeft();
-    },
-  });
+function settleScene(): void {
+  isSceneMoving = false;
 }
 
-function playPremise(): void {
-  if (premiseTimeline) return;
-  moveBanner(1);
-  premiseLeave?.kill();
-  premiseLeave = null;
+function advanceScene(): void {
+  if (scene === 'premise') return;
+  scene = 'premise';
+  isSceneMoving = true;
+  sceneTimeline?.kill();
   resetPremise();
-  gsap.set(premise.value, { autoAlpha: 1 });
   const typing = { count: 0 };
-  premiseTimeline = gsap
+  sceneTimeline = gsap
     .timeline()
-    .to(typing, {
-      count: totalCharacters,
-      duration: PREMISE_CHARACTER_SECONDS * totalCharacters,
-      ease: 'none',
-      onUpdate: () => {
-        typedCount.value = Math.ceil(typing.count);
+    .to(head.value, { yPercent: HEAD_LIFT_PERCENT, autoAlpha: 0, duration: CUT_LEAVE_SECONDS, ease: 'power2.in' }, 0)
+    .to(foot.value, { yPercent: FOOT_DROP_PERCENT, autoAlpha: 0, duration: CUT_LEAVE_SECONDS, ease: 'power2.in' }, 0)
+    .to(docking, { share: 1, duration: BANNER_DOCK_SECONDS, ease: 'power3.out', onUpdate: placeBanner }, 0)
+    .call(settleScene, undefined, BANNER_DOCK_SECONDS)
+    .set(premise.value, { autoAlpha: 1 }, CUT_LEAVE_SECONDS)
+    .to(
+      typing,
+      {
+        count: totalCharacters,
+        duration: PREMISE_CHARACTER_SECONDS * totalCharacters,
+        ease: 'none',
+        onUpdate: () => {
+          typedCount.value = Math.ceil(typing.count);
+        },
       },
-    })
+      CUT_LEAVE_SECONDS,
+    )
     .to(slab.value, {
       scaleX: 1,
       duration: PREMISE_SLAB_SECONDS,
@@ -236,6 +183,23 @@ function playPremise(): void {
     })
     .to(slabText.value, { clipPath: 'inset(0 0% 0 0)', duration: PREMISE_SLAB_SECONDS, ease: 'power2.out' }, '<')
     .to(premiseLabel.value, { clipPath: 'inset(0 0% 0 0)', duration: PANEL_ENTER_SECONDS, ease: 'power3.out' });
+}
+
+function retreatScene(): void {
+  if (scene === 'opening') return;
+  scene = 'opening';
+  isSceneMoving = true;
+  sceneTimeline?.kill();
+  sceneTimeline = gsap
+    .timeline({ onComplete: resetPremise })
+    .to(premise.value, { autoAlpha: 0, yPercent: PREMISE_LEAVE_PERCENT, duration: CUT_LEAVE_SECONDS, ease: 'power2.in' }, 0)
+    .to(docking, { share: 0, duration: BANNER_DOCK_SECONDS, ease: 'power3.inOut', onUpdate: placeBanner }, 0)
+    .call(settleScene, undefined, BANNER_DOCK_SECONDS)
+    .to(
+      [head.value, foot.value],
+      { yPercent: 0, autoAlpha: 1, duration: PANEL_ENTER_SECONDS, ease: 'power3.out' },
+      CUT_LEAVE_SECONDS,
+    );
 }
 
 onMounted(() => {
@@ -251,22 +215,24 @@ onMounted(() => {
   }
   gsap.set(titleBox.value, { transformOrigin: 'center center' });
   gsap.set(premise.value, { autoAlpha: 0 });
-  onIntroFinished(() => window.setTimeout(typeLine, TYPING_START_MILLISECONDS));
+  onIntroFinished(() => {
+    window.setTimeout(typeLine, TYPING_START_MILLISECONDS);
+    removeSceneGate = createSceneGate({
+      isAdvanced: () => scene === 'premise',
+      isMoving: () => isSceneMoving,
+      advance: advanceScene,
+      retreat: retreatScene,
+    });
+  });
   registerScrollSetup(() => {
     ScrollTrigger.create({
       trigger: root.value,
-      start: 'top top',
-      end: () => `+=${window.innerHeight * PIN_DISTANCE_SHARE}`,
-      pin: true,
-      scrub: SCRUB_SMOOTHING_SECONDS,
-      anticipatePin: 1,
-      invalidateOnRefresh: true,
-      onRefresh: (trigger) => {
+      start: 'top top-=1',
+      onEnter: advanceScene,
+      onRefresh: () => {
         measureDock();
         placeBanner();
-        applyProgress(trigger.progress);
       },
-      onUpdate: (trigger) => applyProgress(trigger.progress, trigger.direction),
     });
     gsap.to(cornerTravel, {
       share: 1,
@@ -274,13 +240,18 @@ onMounted(() => {
       onUpdate: placeBanner,
       scrollTrigger: {
         trigger: root.value,
-        start: () => window.innerHeight * PIN_DISTANCE_SHARE,
-        end: () => window.innerHeight * (PIN_DISTANCE_SHARE + CORNER_TRAVEL_SHARE),
-        scrub: SCRUB_SMOOTHING_SECONDS,
+        start: 'top top',
+        end: () => `+=${window.innerHeight * CORNER_TRAVEL_SHARE}`,
+        scrub: true,
         invalidateOnRefresh: true,
       },
     });
   });
+});
+
+onBeforeUnmount(() => {
+  removeSceneGate?.();
+  sceneTimeline?.kill();
 });
 </script>
 
@@ -517,7 +488,7 @@ onMounted(() => {
   align-items: center;
   gap: 0.35em;
   min-height: 1.5em;
-  font-size: 0.8rem;
+  font-size: 0.92rem;
   color: $text-muted;
   white-space: pre;
 }

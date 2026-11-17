@@ -7,10 +7,10 @@ throttles `requestAnimationFrame` to about two frames a second, so GSAP barely t
 content with a transform. Use `scrollToTarget` from `scrollEngine.ts`. Keyboard focus is brought into
 view by the `focusin` listener there.
 
-**"A sticky element does not stick."** Same cause. Pin it with ScrollTrigger (`pin: true`, as the hero does).
+**"A sticky element does not stick."** Same cause. Pin it with ScrollTrigger (`pin: true`).
 
 **"The wordmark is the wrong width after a resize while scrolled."** `fitText` measures `offsetWidth`,
-not the bounding box, because the hero title is scaled by a scrubbed tween.
+not the bounding box, because the hero title is scaled by a tween.
 
 **"Vite warns that `/fonts/Wosker.otf` did not resolve."** Expected until the file is dropped into
 `public/fonts/`. The stack falls back to Chakra Petch.

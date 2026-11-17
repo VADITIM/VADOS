@@ -57,3 +57,26 @@ Chakra Petch's cut corners match the squircle-and-terminal look better than Audi
 JetBrains Mono has even glyph widths and a tighter line, so the hero ASCII banner holds its grid.
 Both are OFL. The hero shows `heroBanner.txt` (the V/AS `banner.txt`) instead of a typed wordmark.
 The Projects section is removed: the page shows VAD/OS products only.
+
+## 2026-11-17 — The hero changes scene on a gesture, not on scroll distance
+
+The hero was pinned for 1.2 screens and scrubbed. The scrub smoothing sat on top of the smoother's,
+so the head and foot trailed the wheel by about two seconds. Once the premise had played, the rest of the
+pin was dead scroll. Scrolling back up paused the page and threw it to the top. Now `sceneGate` reads the
+first downward wheel, swipe or key at the top of the page as intent, swallows it, and plays the whole
+change as one timeline: head and foot cut out, the banner docks, the premise types. The next fresh
+gesture scrolls the page. A fresh upward gesture at the top plays the scene back. A gesture counts as
+fresh after a `GESTURE_GAP_MILLISECONDS` pause in the wheel stream, so trackpad momentum never
+carries through a scene change. A fresh opposite gesture during a change reverses it at once. Leaving the
+top any other way (a link, the navigator) plays the premise scene without blocking. Rejected: a
+shorter pin with played tweens on enter and leave, which still leaves scroll distance where nothing
+happens.
+
+## 2026-11-17 — The root scale follows width and height
+
+`rem` is the only unit components size by, so the root font size is the one place scale is decided.
+Landscape took the width alone, so a wide, short window (a laptop with a tall toolbar, a phone on its
+side) kept a large scale and its rooms overflowed. It now takes the smaller of the width curve and a
+height curve, from 12px to 28px, and the 28px ceiling lets 4K screens keep growing. Portrait was a
+fixed 16px, which left tablets with phone-sized type; it now grows from 15px to 22px with the width.
+Device pixel ratio is not used: CSS pixels already account for it.

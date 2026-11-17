@@ -8,7 +8,7 @@ import { collectRevealPieces, hideRevealPieces, playRevealPiece, playRevealPiece
 type RevealCause = 'intro' | 'scroll' | 'piece';
 
 const SCROLL_REVEAL_START = 'top 85%';
-export const ROOM_REVEAL_START = 'top 65%';
+export const ROOM_REVEAL_START = 'top 73%';
 
 export function useSectionReveal(
   root: Ref<HTMLElement | null>,

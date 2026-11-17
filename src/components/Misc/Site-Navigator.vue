@@ -65,7 +65,7 @@ useSectionReveal(root, 'intro');
   gap: 0.6rem;
   min-height: 2.75rem;
   font-family: $face-heading;
-  font-size: 0.9rem;
+  font-size: 1rem;
   letter-spacing: $heading-tracking;
   color: $text-bright;
   text-decoration: none;
@@ -92,7 +92,7 @@ useSectionReveal(root, 'intro');
 
     .sweep-control {
       padding-inline: 0.45rem;
-      font-size: 0.6rem;
+      font-size: 0.7rem;
     }
   }
 }

@@ -97,9 +97,7 @@ function paddedNumber(value: number): string {
       </ol>
 
       <div class="system-aside">
-        <Module
-          caption="Pick an accent. Nothing in this room names a colour. Every piece reads it from the room."
-        >
+        <Module>
           <ul class="accent-slabs">
             <li v-for="choice in systemAccents" :key="choice.hex">
               <button
@@ -270,7 +268,7 @@ function paddedNumber(value: number): string {
   height: 2.5rem;
   background: $accent;
   color: $accent-ink;
-  font-size: 0.8rem;
+  font-size: 0.92rem;
 }
 
 .step-copy {
@@ -287,7 +285,7 @@ function paddedNumber(value: number): string {
 
 .step-detail {
   @include prose;
-  font-size: 0.85rem;
+  font-size: 0.98rem;
 }
 
 .system-aside {
@@ -342,14 +340,14 @@ function paddedNumber(value: number): string {
 
 .slab-name {
   font-family: $face-heading;
-  font-size: 0.68rem;
+  font-size: 0.78rem;
   letter-spacing: $heading-tracking;
   text-transform: uppercase;
   line-height: 1.2;
 }
 
 .slab-hex {
-  font-size: 0.68rem;
+  font-size: 0.78rem;
   text-transform: uppercase;
 }
 
@@ -368,7 +366,7 @@ function paddedNumber(value: number): string {
   padding: 0.35rem 0.7rem;
   border: 1px solid $border-control;
   border-radius: 999px;
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   color: $text-body;
 }
 </style>

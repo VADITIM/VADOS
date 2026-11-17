@@ -3,8 +3,8 @@
 ## Layers
 
 1. **Registries** (`productsRegistry`, `projectsRegistry`, `systemRegistry`) hold all content. Plain data, no Vue.
-2. **Motion modules** (`scrollEngine`, `textReveal`, `sectionReveal`, `accentRoom`, `fitText`) hold all behaviour shared by sections.
-3. **Sections** (`Hero` with the premise pinned in it, `Products`, `System`, `Projects`, `Footer`) read registries and call the motion modules.
+2. **Motion modules** (`scrollEngine`, `sceneGate`, `textReveal`, `sectionReveal`, `accentRoom`, `fitText`) hold all behaviour shared by sections.
+3. **Sections** (`Hero` with its two scenes behind a gesture gate, `Products`, `System`, `Projects`, `Footer`) read registries and call the motion modules.
 4. **Shared pieces** (`components/Misc`) carry markup contracts the motion modules query by class.
 
 ## Boot order

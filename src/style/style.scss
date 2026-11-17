@@ -8,11 +8,11 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-size: clamp(14px, 0.45vw + 9.5px, 22px);
+  font-size: clamp(14px, min(0.5vw + 9px, 1.6vh + 5px), 28px);
   background: $ground-deep !important;
 
   @include verticalLayout {
-    font-size: 16px;
+    font-size: clamp(15px, 0.9vw + 12.5px, 22px);
   }
 }
 
@@ -26,6 +26,15 @@ html {
   scrollbar-width: none;
   -ms-overflow-style: none;
   -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 html::-webkit-scrollbar {
@@ -78,11 +87,6 @@ svg {
 button {
   font: inherit;
   color: inherit;
-}
-
-::selection {
-  background: $accent;
-  color: $accent-ink;
 }
 
 .visually-hidden {
@@ -172,7 +176,7 @@ button {
   background: transparent;
   color: $text-bright;
   font-family: $face-heading;
-  font-size: 0.78rem;
+  font-size: 0.88rem;
   letter-spacing: $heading-tracking;
   text-transform: uppercase;
   text-decoration: none;
@@ -241,7 +245,7 @@ button {
     min-height: 2.25rem;
     padding: 0.4rem 0.7rem;
     border-color: transparent;
-    font-size: 0.68rem;
+    font-size: 0.78rem;
   }
 }
 

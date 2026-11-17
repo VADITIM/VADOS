@@ -188,7 +188,7 @@ useAccentRoom(root, () => props.product.accent);
   grid-template-columns: auto minmax(0, 1fr);
   gap: 0.9rem;
   max-width: 58ch;
-  font-size: 0.85rem;
+  font-size: 0.98rem;
 }
 
 .strength-mark {
@@ -222,7 +222,7 @@ useAccentRoom(root, () => props.product.accent);
 
   dd {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: 0.98rem;
     color: $text-bright;
   }
 }

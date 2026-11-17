@@ -69,12 +69,3 @@ export function scrollToTarget(selector: string): void {
 export function refreshScrollPositions(): void {
   ScrollTrigger.refresh();
 }
-
-export function setScrollPaused(isPaused: boolean): void {
-  smoother?.paused(isPaused);
-}
-
-export function scrollToTop(): void {
-  if (smoother) smoother.scrollTo(0, true);
-  else window.scrollTo({ top: 0, behavior: isReducedMotion() ? 'auto' : 'smooth' });
-}

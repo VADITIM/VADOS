@@ -11,6 +11,7 @@
 | `src/modules/productsRegistry.ts` | Every product: copy, accent, repository, demonstration |
 | `src/modules/systemRegistry.ts` | V/AS laws, figures, accents, platforms, version |
 | `src/modules/scrollEngine.ts` | GSAP registration, ScrollSmoother, intro gate, reduced motion |
+| `src/modules/sceneGate.ts` | Turns wheel, touch and key intent at the top of the page into scene changes |
 | `src/modules/sectionReveal.ts` | `useSectionReveal`: hide at mount, reveal once on intro or scroll |
 | `src/modules/textReveal.ts` | Bar sweep, mask lift, panel wipe, count-up, positional stagger |
 | `src/modules/accentRoom.ts` | `accentStyle`, `inkFor`, the standing accent, `useAccentRoom` |

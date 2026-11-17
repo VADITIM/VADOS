@@ -108,7 +108,7 @@ useSectionReveal(header);
 .products-total {
   @include microLabel;
   margin-top: 0.6em;
-  font-size: 0.9rem;
+  font-size: 1rem;
   color: $accent;
 }
 

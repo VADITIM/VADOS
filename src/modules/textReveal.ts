@@ -7,6 +7,7 @@ import {
   LIFT_SNAP_ORDER_SECONDS,
   LIFT_SNAP_SECONDS,
   LIFT_TEXT_SECONDS,
+  MODULE_ENTER_SECONDS,
   PANEL_ENTER_SECONDS,
   SWEEP_GROW_SECONDS,
   SWEEP_RETRACT_SECONDS,
@@ -26,6 +27,11 @@ const CLIPPED_CONTROL = 'inset(0 0 0 100%)';
 const OPEN_CONTROL = 'inset(0 0 0 0%)';
 const CONTROL_SELECTOR = '.sweep-control';
 const HIDDEN_LIFT_PERCENT = 115;
+const MODULE_SELECTOR = '.module';
+const WELL_SELECTOR = '.module-well';
+const CLIPPED_MODULE = 'inset(0 100% 0 0)';
+const OPEN_MODULE = 'inset(0 0% 0 0)';
+const MODULE_WELL_SCALE = 1.14;
 
 function collect(root: HTMLElement, selector: string): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(selector)];
@@ -68,6 +74,11 @@ export function hideRevealPieces(root: HTMLElement): void {
   });
   gsap.set(collect(root, LIFT_SELECTOR), { yPercent: HIDDEN_LIFT_PERCENT });
   collect(root, PANEL_SELECTOR).forEach((panel) => {
+    if (panel.matches(MODULE_SELECTOR)) {
+      gsap.set(panel, { clipPath: CLIPPED_MODULE });
+      gsap.set(panel.querySelector(WELL_SELECTOR), { scale: MODULE_WELL_SCALE, transformOrigin: 'left center' });
+      return;
+    }
     gsap.set(panel, { clipPath: panel.matches(CONTROL_SELECTOR) ? CLIPPED_CONTROL : CLIPPED_PANEL });
   });
   collect(root, COUNT_SELECTOR).forEach((element) => {
@@ -98,7 +109,30 @@ function liftPiece(piece: HTMLElement, delay: number): void {
   });
 }
 
+function openModule(panel: HTMLElement, delay: number): void {
+  gsap.to(panel, {
+    clipPath: OPEN_MODULE,
+    duration: MODULE_ENTER_SECONDS,
+    ease: 'power3.out',
+    delay,
+    overwrite: 'auto',
+    clearProps: 'clipPath',
+  });
+  gsap.to(panel.querySelector(WELL_SELECTOR), {
+    scale: 1,
+    duration: MODULE_ENTER_SECONDS * 1.25,
+    ease: 'power3.out',
+    delay,
+    overwrite: 'auto',
+    clearProps: 'transform',
+  });
+}
+
 function openPanel(panel: HTMLElement, delay: number): void {
+  if (panel.matches(MODULE_SELECTOR)) {
+    openModule(panel, delay);
+    return;
+  }
   gsap.to(panel, {
     clipPath: panel.matches(CONTROL_SELECTOR) ? OPEN_CONTROL : OPEN_PANEL,
     duration: PANEL_ENTER_SECONDS,
