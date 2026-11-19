@@ -10,6 +10,7 @@ import { useSectionReveal } from '@/modules/sectionReveal';
 import ProductRoom from './Product-Room.vue';
 
 const COUNT_WIDTH = 2;
+const baseUrl = import.meta.env.BASE_URL;
 
 const header = ref<HTMLElement | null>(null);
 
@@ -41,6 +42,7 @@ useSectionReveal(header);
           @click.prevent="scrollToTarget(`#product-${product.id}`)"
         >
           <span class="tabular">{{ String(productIndex + 1).padStart(COUNT_WIDTH, '0') }}</span>
+          <img class="index-icon" :src="`${baseUrl}${product.icon}`" alt="" width="64" height="64" />
           {{ product.name }}
         </a>
       </nav>
@@ -59,6 +61,12 @@ useSectionReveal(header);
 </template>
 
 <style scoped lang="scss">
+.index-icon {
+  width: 1.1em;
+  height: 1.1em;
+  flex: none;
+}
+
 .products-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

@@ -19,6 +19,7 @@ const root = ref<HTMLElement | null>(null);
 const isMirrored = computed(() => props.roomIndex % 2 === 1);
 const latestVersion = useLatestVersion(props.product);
 const releaseLabel = computed(() => `v${latestVersion.value}`);
+const iconSource = computed(() => `${import.meta.env.BASE_URL}${props.product.icon}`);
 const hasDemonstration = computed(() => props.product.demonstration.kind !== 'none');
 const roomLabel = computed(() => {
   const number = String(props.roomIndex + 1).padStart(COUNT_WIDTH, '0');
@@ -40,7 +41,10 @@ useAccentRoom(root, () => props.product.accent);
   >
     <div class="room-copy">
       <SweepLabel class="micro-label tabular" tag="p" :text="roomLabel" />
-      <SweepLabel class="room-name" tag="h3" :text="product.name" />
+      <div class="room-title">
+        <img class="room-icon reveal-panel" :src="iconSource" alt="" width="256" height="256" />
+        <SweepLabel class="room-name" tag="h3" :text="product.name" />
+      </div>
       <LiftText class="room-headline" tag="p" :text="product.headline" />
       <ul class="room-strengths">
         <li v-for="strength in product.strengths" :key="strength" class="room-strength">
@@ -155,6 +159,23 @@ useAccentRoom(root, () => props.product.accent);
       order: 0;
     }
   }
+}
+
+.room-title {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  font-size: clamp(2.6rem, 6.2vw, 7.5rem);
+
+  @include verticalLayout {
+    font-size: clamp(2.2rem, 11.5vw, 5rem);
+  }
+}
+
+.room-icon {
+  flex: none;
+  width: 1em;
+  height: 1em;
 }
 
 .room-name {

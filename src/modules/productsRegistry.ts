@@ -10,6 +10,7 @@ export type ProductDemonstration =
 export interface Product {
   id: string;
   name: string;
+  icon: string;
   platform: string;
   stack: string;
   accent: string;
@@ -27,6 +28,7 @@ export const products: Product[] = [
   {
     id: 'shell',
     name: 'Shell',
+    icon: 'icons/shell.svg',
     platform: 'Linux (Arch) · any wlr-layer-shell compositor',
     stack: 'Quickshell · Qt 6 · QML',
     accent: '#0040ff',
@@ -47,6 +49,7 @@ export const products: Product[] = [
   {
     id: 'terminal',
     name: 'Terminal',
+    icon: 'icons/terminal.svg',
     platform: 'Windows · Linux',
     stack: 'Tauri v2 · SvelteKit · Rust',
     accent: '#8a2be2',
@@ -66,6 +69,7 @@ export const products: Product[] = [
   {
     id: 'bubble',
     name: 'Bubble',
+    icon: 'icons/bubble.svg',
     platform: 'Android · One UI 8+',
     stack: 'Kotlin · WebView · Shizuku',
     accent: '#FFDD1B',
@@ -85,6 +89,7 @@ export const products: Product[] = [
   {
     id: 'gallery',
     name: 'Gallery',
+    icon: 'icons/gallery.svg',
     platform: 'Android · Windows · Linux (Arch)',
     stack: 'Kotlin · Jetpack Compose · Qt 6',
     accent: '#DC143C',
@@ -103,6 +108,7 @@ export const products: Product[] = [
   {
     id: 'files',
     name: 'Files',
+    icon: 'icons/files.svg',
     platform: 'Windows · Linux (Arch)',
     stack: 'Qt 6 · QML · C++',
     accent: '#f09b3a',
@@ -122,6 +128,7 @@ export const products: Product[] = [
   {
     id: 'notes',
     name: 'Notes',
+    icon: 'icons/notes.svg',
     platform: 'iPadOS 26+ · Windows · Linux (Arch)',
     stack: 'SwiftUI · Tauri · a shared Swift core',
     accent: '#5bfd5b',
